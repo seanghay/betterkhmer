@@ -1,4 +1,4 @@
-# betterkhmer
+# BetterKhmer
 
 Khmer Unicode normalizer ported to 14 languages. All implementations expose a single `normalize()` function and pass the same 10,085-line fixture suite.
 
@@ -58,6 +58,29 @@ const result = normalize('ខ្មែរ');
 ```
 
 See the per-language `README.md` in each subdirectory for install and usage details.
+
+## Why this exists
+
+Khmer syllables are two-dimensional arrangements of marks surrounding a base consonant. Unicode does not mandate a single encoding order for these marks, so the same rendered word can be stored as multiple distinct byte sequences.
+
+The word ស្ត្រី ("woman") can be encoded at least three ways that look identical on screen:
+
+| Sequence | Codepoints | Sounds like |
+|----------|------------|-------------|
+| ស ្ត ្រ ី | U+179F U+17D2 U+178F U+17D2 U+179A U+17B8 | s-t-r-ī (correct) |
+| ស ្រ ្ត ី | U+179F U+17D2 U+179A U+17D2 U+178F U+17B8 | s-r-t-ī |
+| ស ្រ ី ្ត | U+179F U+17D2 U+179A U+17B8 U+17D2 U+178F | s-r-ī-t |
+
+This disorder has real consequences:
+
+- **Search breaks** — Google returns completely different results for visually identical queries typed in different apps.
+- **Security spoofing** — `ស្ត្រី.com`, `ស្រ្តី.com`, and `ស្រី្ត.com` look the same in a browser bar but route to different servers.
+- **Code review is unreliable** — variable names that appear identical may differ in encoding, making malicious substitutions invisible.
+- **Rendering artifacts** — some browsers show dotted-circle error markers for out-of-order marks that others silently accept.
+
+`normalize()` collapses all equivalent forms into one canonical byte sequence, so search, comparison, storage, and security checks behave correctly regardless of which keyboard or app produced the text.
+
+Further reading: [Order and Disorder in Unicode](https://lontar.eu/en/notes/order-and-disorder-in-unicode/) · [Proposed Khmer encoding structure (Unicode L2/22-290)](https://www.unicode.org/L2/L2022/22290-khmer-encoding.pdf)
 
 ## What it does
 
