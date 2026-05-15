@@ -82,6 +82,8 @@ This disorder has real consequences:
 
 Further reading: [Order and Disorder in Unicode](https://lontar.eu/en/notes/order-and-disorder-in-unicode/) · [Proposed Khmer encoding structure (Unicode L2/22-290)](https://www.unicode.org/L2/L2022/22290-khmer-encoding.pdf)
 
+**Talk**: [S3T1 — Discrepancies in Khmer Unicode Character Ordering Rules and a Proposed Solution](https://www.youtube.com/watch?v=mD-nrfvWtgc) — the conference presentation behind the encoding proposal that this library implements.
+
 ## What it does
 
 - Sorts character components within each Khmer syllable by Unicode category

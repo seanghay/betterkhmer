@@ -1,0 +1,179 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python tests/test_fixtures.py
+        working-directory: python/betterkhmer
+
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - run: go test ./...
+        working-directory: go/betterkhmer
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test
+        working-directory: rust/betterkhmer
+
+  swift:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test
+        working-directory: swift/betterkhmer
+
+  dart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+      - run: dart pub get && dart test
+        working-directory: dart/betterkhmer
+
+  ruby:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - run: ruby spec/betterkhmer_spec.rb
+        working-directory: ruby/betterkhmer
+
+  php:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: composer install
+        working-directory: php/betterkhmer
+      - run: php tests/test_fixtures.php ../../fixtures
+        working-directory: php/betterkhmer
+
+  java:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Compile
+        run: |
+          mkdir -p build/classes
+          javac -encoding UTF-8 -d build/classes \
+            src/main/java/com/betterkhmer/*.java \
+            src/test/java/com/betterkhmer/*.java
+        working-directory: java/betterkhmer
+      - name: Test
+        run: |
+          java -Dfile.encoding=UTF-8 -cp build/classes \
+            -Dfixtures.dir=../../fixtures com.betterkhmer.BetterKhmerTest
+        working-directory: java/betterkhmer
+
+  kotlin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Install Kotlin
+        run: sudo snap install kotlin --classic
+      - name: Compile
+        run: |
+          mkdir -p build
+          kotlinc \
+            src/main/kotlin/com/betterkhmer/BetterKhmer.kt \
+            src/test/kotlin/com/betterkhmer/BetterKhmerTest.kt \
+            -include-runtime -d build/betterkhmer-test.jar
+        working-directory: kotlin/betterkhmer
+      - name: Test
+        run: |
+          java -Dfile.encoding=UTF-8 -Dfixtures.dir=../../fixtures \
+            -jar build/betterkhmer-test.jar com.betterkhmer.BetterKhmerTestKt
+        working-directory: kotlin/betterkhmer
+
+  csharp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0'
+      - run: dotnet run --project test -- ../../fixtures
+        working-directory: csharp/betterkhmer
+
+  c:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y libpcre2-dev
+      - run: cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
+        working-directory: c/betterkhmer
+      - run: ./build/test_normalize ../../fixtures
+        working-directory: c/betterkhmer
+
+  cpp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y libpcre2-dev
+      - run: cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
+        working-directory: cpp/betterkhmer
+      - run: ./build/test_normalize ../../fixtures
+        working-directory: cpp/betterkhmer
+
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install
+        working-directory: typescript/betterkhmer
+      - run: npx tsc
+        working-directory: typescript/betterkhmer
+      - run: node test/fixtures.js ../../fixtures
+        working-directory: typescript/betterkhmer
+
+  zig:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: '0.14.1'
+      - run: sudo apt-get install -y libpcre2-dev
+      - run: zig build -Doptimize=ReleaseFast
+        working-directory: zig/betterkhmer
+      - run: ./zig-out/bin/test_normalize ../../fixtures
+        working-directory: zig/betterkhmer
+
+  perl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: perl -Ilib t/fixtures.pl ../../fixtures
+        working-directory: perl/betterkhmer
