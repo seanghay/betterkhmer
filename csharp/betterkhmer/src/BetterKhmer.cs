@@ -9,7 +9,7 @@ using System.Text.RegularExpressions;
 
 namespace BetterKhmer;
 
-public static class Khnormal
+public static class BetterKhmer
 {
     private const int CatOther   = 0;
     private const int CatBase    = 1;
@@ -27,7 +27,7 @@ public static class Khnormal
 
     private static readonly int[] Categories;
 
-    static Khnormal()
+    static BetterKhmer()
     {
         int[] c = new int[0x17DE - 0x1780];
         Array.Fill(c, CatOther);

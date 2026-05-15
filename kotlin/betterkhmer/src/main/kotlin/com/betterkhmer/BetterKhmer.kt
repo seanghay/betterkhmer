@@ -5,7 +5,7 @@ package com.betterkhmer
 
 import java.util.Arrays
 
-object Khnormal {
+object BetterKhmer {
     private const val CAT_OTHER   = 0
     private const val CAT_BASE    = 1
     private const val CAT_ROBAT   = 2

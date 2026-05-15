@@ -5,9 +5,9 @@ Khmer Unicode normalizer.
 ## Usage
 
 ```java
-import com.betterkhmer.Khnormal;
+import com.betterkhmer.BetterKhmer;
 
-String result = Khnormal.normalize("ខ្មែរ");
+String result = BetterKhmer.normalize("ខ្មែរ");
 ```
 
 ## Build & Test
@@ -17,5 +17,5 @@ cd java/betterkhmer
 javac -encoding UTF-8 -d build/classes src/main/java/com/betterkhmer/*.java \
       src/test/java/com/betterkhmer/*.java
 java -Dfile.encoding=UTF-8 -cp build/classes \
-     -Dfixtures.dir=../../fixtures com.betterkhmer.KhnormalTest
+     -Dfixtures.dir=../../fixtures com.betterkhmer.BetterKhmerTest
 ```

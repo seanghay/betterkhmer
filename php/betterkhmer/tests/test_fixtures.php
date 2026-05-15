@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../src/BetterKhmer.php';
 
-use BetterKhmer\Khnormal;
+use BetterKhmer\BetterKhmer;
 
 $root = __DIR__ . '/../../..';
 
@@ -15,7 +15,7 @@ function loadLines(string $path): array {
 }
 
 // Basic test
-$got = Khnormal::normalize('ខ្មែរ');
+$got = BetterKhmer::normalize('ខ្មែរ');
 if ($got !== 'ខ្មែរ') {
     fwrite(STDERR, "basic FAILED: got " . json_encode($got) . "\n");
     exit(1);
@@ -39,7 +39,7 @@ if (count($inputs) !== count($expected)) {
 
 $failures = 0;
 foreach ($inputs as $i => $inp) {
-    $result = Khnormal::normalize($inp);
+    $result = BetterKhmer::normalize($inp);
     if ($result !== $expected[$i]) {
         $failures++;
         if ($failures <= 10) {

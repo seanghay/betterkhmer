@@ -6,7 +6,7 @@ declare(strict_types=1);
 
 namespace BetterKhmer;
 
-final class Khnormal
+final class BetterKhmer
 {
     const CAT_OTHER   = 0;
     const CAT_BASE    = 1;

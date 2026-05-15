@@ -5,9 +5,9 @@ Khmer Unicode normalizer.
 ## Usage
 
 ```csharp
-using BetterKhmer;
+using static BetterKhmer.BetterKhmer;
 
-string result = Khnormal.Normalize("ខ្មែរ");
+string result = Normalize("ខ្មែរ");
 ```
 
 ## Build & Test

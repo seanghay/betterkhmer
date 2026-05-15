@@ -9,7 +9,7 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public final class Khnormal {
+public final class BetterKhmer {
     private static final int CAT_OTHER   = 0;
     private static final int CAT_BASE    = 1;
     private static final int CAT_ROBAT   = 2;
@@ -74,7 +74,7 @@ public final class Khnormal {
     private static final Pattern RE_LUNAR1   = Pattern.compile("(១?)([០-៩])្។");
     private static final Pattern RE_LUNAR2   = Pattern.compile("។្(១?)([០-៩])");
 
-    private Khnormal() {}
+    private BetterKhmer() {}
 
     private static int charcat(int cp) {
         if (cp >= 0x1780 && cp <= 0x17DD) return CATEGORIES[cp - 0x1780];

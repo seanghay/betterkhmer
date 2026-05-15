@@ -11,9 +11,9 @@ composer require betterkhmer/betterkhmer
 ## Usage
 
 ```php
-use BetterKhmer\Khnormal;
+use BetterKhmer\BetterKhmer;
 
-$result = Khnormal::normalize('ខ្មែរ');
+$result = BetterKhmer::normalize('ខ្មែរ');
 ```
 
 ## Test

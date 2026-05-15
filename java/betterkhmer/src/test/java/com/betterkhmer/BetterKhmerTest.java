@@ -4,7 +4,7 @@ import java.io.*;
 import java.nio.file.*;
 import java.util.*;
 
-public class KhnormalTest {
+public class BetterKhmerTest {
     private static final String FIXTURES = System.getProperty("fixtures.dir",
         System.getProperty("user.dir") + "/../../fixtures");
 
@@ -15,7 +15,7 @@ public class KhnormalTest {
 
     public static void main(String[] args) throws Exception {
         // basic
-        String got = Khnormal.normalize("ខ្មែរ");
+        String got = BetterKhmer.normalize("ខ្មែរ");
         if (!got.equals("ខ្មែរ")) {
             throw new AssertionError("basic FAILED: got " + got);
         }
@@ -27,7 +27,7 @@ public class KhnormalTest {
 
         int failures = 0;
         for (int i = 0; i < inputs.size(); i++) {
-            String result = Khnormal.normalize(inputs.get(i));
+            String result = BetterKhmer.normalize(inputs.get(i));
             if (!result.equals(expected.get(i))) {
                 failures++;
                 if (failures <= 10) {

@@ -1,11 +1,11 @@
 using System;
 using System.IO;
-using BetterKhmer;
+using static BetterKhmer.BetterKhmer;
 
 string fixturesDir = args.Length > 0 ? args[0]
     : Path.Combine(AppContext.BaseDirectory, "../../../../../fixtures");
 
-string got = Khnormal.Normalize("ខ្មែរ");
+string got = Normalize("ខ្មែរ");
 if (got != "ខ្មែរ") throw new Exception($"basic FAILED: got {got}");
 Console.WriteLine("basic: ok");
 
@@ -16,7 +16,7 @@ if (inputs.Length != expected.Length) throw new Exception("length mismatch");
 int failures = 0;
 for (int i = 0; i < inputs.Length; i++)
 {
-    string result = Khnormal.Normalize(inputs[i]);
+    string result = Normalize(inputs[i]);
     if (result != expected[i])
     {
         failures++;

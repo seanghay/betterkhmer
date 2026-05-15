@@ -7,7 +7,7 @@ fun main() {
     val fixturesDir = System.getProperty("fixtures.dir",
         System.getProperty("user.dir") + "/../../fixtures")
 
-    val got = Khnormal.normalize("ខ្មែរ")
+    val got = BetterKhmer.normalize("ខ្មែរ")
     check(got == "ខ្មែរ") { "basic FAILED: got $got" }
     println("basic: ok")
 
@@ -17,7 +17,7 @@ fun main() {
 
     var failures = 0
     for (i in inputs.indices) {
-        val result = Khnormal.normalize(inputs[i])
+        val result = BetterKhmer.normalize(inputs[i])
         if (result != expected[i]) {
             failures++
             if (failures <= 10) System.err.println("[$i] got $result, want ${expected[i]}")

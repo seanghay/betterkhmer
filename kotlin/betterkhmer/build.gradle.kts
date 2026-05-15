@@ -19,7 +19,7 @@ kotlin {
 }
 
 application {
-    mainClass.set("com.betterkhmer.KhnormalTestKt")
+    mainClass.set("com.betterkhmer.BetterKhmerTestKt")
 }
 
 tasks.test {
@@ -30,7 +30,7 @@ tasks.test {
 }
 
 tasks.jar {
-    manifest { attributes["Main-Class"] = "com.betterkhmer.KhnormalTestKt" }
+    manifest { attributes["Main-Class"] = "com.betterkhmer.BetterKhmerTestKt" }
     from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) })
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
