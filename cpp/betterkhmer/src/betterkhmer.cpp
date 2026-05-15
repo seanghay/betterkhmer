@@ -5,6 +5,8 @@
 #include "betterkhmer.hpp"
 #include <pcre2.h>
 #include <array>
+#include <vector>
+#include <string>
 #include <cstring>
 #include <algorithm>
 #include <numeric>
