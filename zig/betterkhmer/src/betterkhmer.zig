@@ -1,116 +1,14 @@
 // Copyright (c) 2021-2024, SIL Global. Licensed under MIT license.
-// Ported to Zig (PCRE2 via extern) — betterkhmer package.
+// Ported to Zig — betterkhmer package. Regex-free; 1:1 with the Go reference.
 
 const std = @import("std");
 const mem = std.mem;
 
-// ---- PCRE2 extern declarations ----
-
-const PCRE2_UTF                      : u32   = 0x00080000;
-const PCRE2_UCP                      : u32   = 0x00020000;
-const PCRE2_SUBSTITUTE_GLOBAL        : u32   = 0x00000100;
-const PCRE2_SUBSTITUTE_EXTENDED      : u32   = 0x00000200;
-const PCRE2_SUBSTITUTE_OVERFLOW_LENGTH: u32  = 0x00001000;
-const PCRE2_ERROR_NOMEMORY           : i32   = -48;
-const PCRE2_ZERO_TERMINATED          : usize = ~@as(usize, 0);
-const PCRE2_UNSET                    : usize = ~@as(usize, 0);
-
-const Code      = opaque {};
-const MatchData = opaque {};
-
-extern fn pcre2_compile_8(
-    pattern: [*]const u8, length: usize, options: u32,
-    errorcode: *i32, erroroffset: *usize, context: ?*anyopaque,
-) ?*Code;
-extern fn pcre2_code_free_8(code: *Code) void;
-extern fn pcre2_match_data_create_from_pattern_8(code: *Code, ctx: ?*anyopaque) ?*MatchData;
-extern fn pcre2_match_data_free_8(md: *MatchData) void;
-extern fn pcre2_match_8(
-    code: *Code, subject: [*]const u8, length: usize, startoffset: usize,
-    options: u32, match_data: *MatchData, context: ?*anyopaque,
-) i32;
-extern fn pcre2_get_ovector_pointer_8(md: *MatchData) [*]usize;
-extern fn pcre2_substitute_8(
-    code: *Code, subject: [*]const u8, length: usize, startoffset: usize,
-    options: u32, match_data: ?*MatchData, context: ?*anyopaque,
-    replacement: [*]const u8, rlength: usize,
-    outputbuffer: [*]u8, outlengthptr: *usize,
-) i32;
-
-// ---- PCRE2 wrapper ----
-
-const Re = struct {
-    code: *Code,
-
-    fn init(pat: []const u8) Re {
-        var err: i32 = undefined;
-        var erroff: usize = undefined;
-        const code = pcre2_compile_8(pat.ptr, pat.len, PCRE2_UTF | PCRE2_UCP,
-                                     &err, &erroff, null) orelse @panic("bad regex");
-        return .{ .code = code };
-    }
-
-    fn deinit(self: Re) void { pcre2_code_free_8(self.code); }
-};
-
-fn subStr(re: Re, alloc: mem.Allocator, s: []const u8, repl: []const u8) ![]u8 {
-    var bufcap: usize = s.len * 2 + 256;
-    var buf = try alloc.alloc(u8, bufcap);
-    var outlen: usize = bufcap;
-
-    var rc = pcre2_substitute_8(
-        re.code, s.ptr, s.len, 0,
-        PCRE2_SUBSTITUTE_GLOBAL | PCRE2_SUBSTITUTE_EXTENDED | PCRE2_SUBSTITUTE_OVERFLOW_LENGTH,
-        null, null, repl.ptr, repl.len, buf.ptr, &outlen,
-    );
-    if (rc == PCRE2_ERROR_NOMEMORY) {
-        alloc.free(buf);
-        bufcap = outlen + 1;
-        buf = try alloc.alloc(u8, bufcap);
-        outlen = bufcap;
-        rc = pcre2_substitute_8(
-            re.code, s.ptr, s.len, 0,
-            PCRE2_SUBSTITUTE_GLOBAL | PCRE2_SUBSTITUTE_EXTENDED,
-            null, null, repl.ptr, repl.len, buf.ptr, &outlen,
-        );
-    }
-    if (rc < 0) { alloc.free(buf); return try alloc.dupe(u8, s); }
-    const result = try alloc.dupe(u8, buf[0..outlen]);
-    alloc.free(buf);
-    return result;
-}
-
-fn subLunar(re: Re, alloc: mem.Allocator, input: []const u8, base: u21) ![]u8 {
-    const md = pcre2_match_data_create_from_pattern_8(re.code, null) orelse return error.OutOfMemory;
-    defer pcre2_match_data_free_8(md);
-    var out = std.ArrayList(u8).init(alloc);
-    var pos: usize = 0;
-    while (pos <= input.len) {
-        const rc = pcre2_match_8(re.code, input.ptr, input.len, pos, 0, md, null);
-        if (rc < 0) { try out.appendSlice(input[pos..]); break; }
-        const ov = pcre2_get_ovector_pointer_8(md);
-        const ms = ov[0]; const me = ov[1];
-        try out.appendSlice(input[pos..ms]);
-        var v1: u21 = 0;
-        if (ov[2] != PCRE2_UNSET and ov[3] > ov[2]) {
-            const r = u8dec(input[ov[2]..]);
-            v1 = r.cp - 0x17E0;
-        }
-        const r2 = u8dec(input[ov[4]..]);
-        const v = v1 * 10 + (r2.cp - 0x17E0);
-        if (v <= 15) try appendCP(&out, base + v)
-        else try out.appendSlice(input[ms..me]);
-        if (me == ms) { if (ms < input.len) try out.append(input[ms]); pos = ms + 1; }
-        else pos = me;
-    }
-    return out.toOwnedSlice();
-}
-
 // ---- Character categories ----
 
 const Cat = enum(u8) {
-    other=0, base=1, robat=2, coeng=3, shift=4, z=5,
-    vpre=6, vb=7, va=8, vpost=9, ms=10, mf=11, zfcoeng=12,
+    other = 0, base = 1, robat = 2, coeng = 3, shift = 4, z = 5,
+    vpre = 6, vb = 7, va = 8, vpost = 9, ms = 10, mf = 11, zfcoeng = 12,
 };
 
 const CAT_LEN = 0x17DE - 0x1780;
@@ -149,6 +47,49 @@ fn charcat(cp: u21) Cat {
     return .other;
 }
 
+// ---- Khmer consonant classes (from the SIL reference khres) ----
+
+const ZWNJ: u21 = 0x200C;
+const ZWJ: u21 = 0x200D;
+const COENG: u21 = 0x17D2;
+const ROBAT: u21 = 0x17CC;
+const BA: u21 = 0x1794;
+
+fn isBase(r: u21) bool {
+    return (r >= 0x1780 and r <= 0x17A2) or (r >= 0x17A5 and r <= 0x17B3) or r == 0x25CC;
+}
+fn isNonRo(r: u21) bool {
+    return (r >= 0x1780 and r <= 0x1799) or (r >= 0x179B and r <= 0x17A2) or
+        (r >= 0x17A5 and r <= 0x17B3);
+}
+fn isNonBA(r: u21) bool {
+    return (r >= 0x1780 and r <= 0x1793) or (r >= 0x1795 and r <= 0x17A2) or
+        (r >= 0x17A5 and r <= 0x17B3);
+}
+fn isS1(r: u21) bool {
+    if (r >= 0x1780 and r <= 0x1783) return true;
+    if (r >= 0x1785 and r <= 0x1788) return true;
+    if (r >= 0x178A and r <= 0x178D) return true;
+    if (r >= 0x178F and r <= 0x1792) return true;
+    if (r >= 0x1795 and r <= 0x1797) return true;
+    if (r >= 0x179E and r <= 0x17A0) return true;
+    if (r == 0x17A2) return true;
+    return false;
+}
+fn isS2(r: u21) bool {
+    if (r == 0x1780 or r == 0x1784 or r == 0x178E or r == 0x1793 or
+        r == 0x1794 or r == 0x17A1) return true;
+    if (r >= 0x1798 and r <= 0x179D) return true;
+    if (r >= 0x17A3 and r <= 0x17B3) return true;
+    return false;
+}
+fn isVPre(r: u21) bool {
+    return r >= 0x17C1 and r <= 0x17C5;
+}
+fn isDigit(r: u21) bool {
+    return r >= 0x17E0 and r <= 0x17E9;
+}
+
 // ---- UTF-8 helpers ----
 
 const Decoded = struct { cp: u21, len: u3 };
@@ -159,15 +100,20 @@ fn u8dec(s: []const u8) Decoded {
     if (b < 0xE0) return .{ .cp = @as(u21, b & 0x1F) << 6 | (s[1] & 0x3F), .len = 2 };
     if (b < 0xF0) return .{
         .cp = @as(u21, b & 0x0F) << 12 | @as(u21, s[1] & 0x3F) << 6 | (s[2] & 0x3F),
-        .len = 3 };
+        .len = 3,
+    };
     return .{
         .cp = @as(u21, b & 0x07) << 18 | @as(u21, s[1] & 0x3F) << 12 |
-              @as(u21, s[2] & 0x3F) << 6 | (s[3] & 0x3F),
-        .len = 4 };
+            @as(u21, s[2] & 0x3F) << 6 | (s[3] & 0x3F),
+        .len = 4,
+    };
 }
 
 fn u8enc(cp: u21, buf: []u8) u3 {
-    if (cp < 0x80) { buf[0] = @intCast(cp); return 1; }
+    if (cp < 0x80) {
+        buf[0] = @intCast(cp);
+        return 1;
+    }
     if (cp < 0x800) {
         buf[0] = @intCast(0xC0 | (cp >> 6));
         buf[1] = @intCast(0x80 | (cp & 0x3F));
@@ -191,72 +137,376 @@ fn appendCP(out: *std.ArrayList(u8), cp: u21) !void {
     try out.appendSlice(buf[0..u8enc(cp, &buf)]);
 }
 
-// ---- Khmer patterns (raw UTF-8) ----
+// ---- optRobat: positions after an optional Robat at p ----
 
-const PAT_B       = "[\xe1\x9e\x80-\xe1\x9e\xa2\xe1\x9e\xa5-\xe1\x9e\xb3\xe2\x97\x8c]";
-const PAT_NON_RO  = "[\xe1\x9e\x80-\xe1\x9e\x99\xe1\x9e\x9b-\xe1\x9e\xa2\xe1\x9e\xa5-\xe1\x9e\xb3]";
-const PAT_NON_BA  = "[\xe1\x9e\x80-\xe1\x9e\x93\xe1\x9e\x95-\xe1\x9e\xa2\xe1\x9e\xa5-\xe1\x9e\xb3]";
-const PAT_S1      = "[\xe1\x9e\x80-\xe1\x9e\x83\xe1\x9e\x85-\xe1\x9e\x88\xe1\x9e\x8a-\xe1\x9e\x8d\xe1\x9e\x8f-\xe1\x9e\x92\xe1\x9e\x95-\xe1\x9e\x97\xe1\x9e\x9e-\xe1\x9e\xa0\xe1\x9e\xa2]";
-const PAT_S2      = "[\xe1\x9e\x84\xe1\x9e\x80\xe1\x9e\x8e\xe1\x9e\x93\xe1\x9e\x94\xe1\x9e\x98-\xe1\x9e\x9d\xe1\x9e\xa1\xe1\x9e\xa3-\xe1\x9e\xb3]";
-const PAT_VA      = "(?:[\xe1\x9e\xb7-\xe1\x9e\xba\xe1\x9e\xbe\xe1\x9e\xbf\xe1\x9f\x9d]|\xe1\x9e\xb6\xe1\x9f\x86)";
-const PAT_COENG   = "(?:(?:\xe1\x9f\x92" ++ PAT_NON_RO ++ ")?\xe1\x9f\x92" ++ PAT_B ++ ")";
-const PAT_STRONG  =
-    PAT_S1 ++ "\xe1\x9f\x8c?(?:\xe1\x9f\x92" ++ PAT_NON_BA ++ "(?:\xe1\x9f\x92" ++ PAT_NON_BA ++ ")?)?" ++
-    "|" ++ PAT_NON_BA ++ "\xe1\x9f\x8c?(?:\xe1\x9f\x92" ++ PAT_S1 ++ "(?:\xe1\x9f\x92" ++ PAT_NON_BA ++ ")?" ++
-    "|\xe1\x9f\x92" ++ PAT_NON_BA ++ "\xe1\x9f\x92" ++ PAT_S1 ++ ")";
-const PAT_NSTRONG =
-    "(?:" ++ PAT_S2 ++ "\xe1\x9f\x8c?(?:\xe1\x9f\x92" ++ PAT_S2 ++ "(?:\xe1\x9f\x92" ++ PAT_S2 ++ ")?)?" ++
-    "|\xe1\x9e\x94\xe1\x9f\x8c?(?:" ++ PAT_COENG ++ "(?:" ++ PAT_COENG ++ ")?)?" ++
-    "|" ++ PAT_B ++ "\xe1\x9f\x8c?(?:\xe1\x9f\x92" ++ PAT_NON_RO ++ "\xe1\x9f\x92\xe1\x9e\x94" ++
-    "|\xe1\x9f\x92\xe1\x9e\x94(?:\xe1\x9f\x92" ++ PAT_B ++ ")))";
+const RobatEnds = struct { p: [2]usize, n: u2 };
 
-// ---- Compiled patterns (lazy singleton) ----
+fn optRobat(r: []const u21, p: usize) RobatEnds {
+    if (p < r.len and r[p] == ROBAT) return .{ .p = .{ p, p + 1 }, .n = 2 };
+    return .{ .p = .{ p, 0 }, .n = 1 };
+}
 
-const Patterns = struct {
-    invis:   Re,
-    vbe:     Re,
-    v1:      Re,
-    v2:      Re,
-    v3:      Re,
-    strong:  Re,
-    nstrong: Re,
-    coengRo: Re,
-    coengDa: Re,
-    lunar1:  Re,
-    lunar2:  Re,
-    xhm:     Re,
-};
+// ---- coengEnds: end indices of one COENG: (?:(?:្ NonRo)? ្ B) ----
 
-var g_patterns: Patterns = undefined;
-var g_inited: bool = false;
+const CoengEnds = struct { e: [2]usize, n: u2 };
 
-fn ensureInit() void {
-    if (g_inited) return;
-    g_inited = true;
-    g_patterns = Patterns{
-        .invis   = Re.init("(\xe2\x80\x8d?\xe1\x9f\x92)[\xe1\x9f\x92\xe2\x80\x8c\xe2\x80\x8d]+"),
-        .vbe     = Re.init("\xe1\x9e\xbe\xe1\x9e\xb6"),
-        .v1      = Re.init("\xe1\x9f\x81([\xe1\x9e\xbb-\xe1\x9e\xbd]?)\xe1\x9e\xb8"),
-        .v2      = Re.init("\xe1\x9f\x81([\xe1\x9e\xbb-\xe1\x9e\xbd]?)\xe1\x9e\xb6"),
-        .v3      = Re.init("(\xe1\x9e\xbe)(\xe1\x9e\xbb)"),
-        .strong  = Re.init("((?:" ++ PAT_STRONG  ++ ")[\xe1\x9f\x81-\xe1\x9f\x85]?)\xe1\x9e\xbb(?=" ++ PAT_VA ++ "|\xe1\x9f\x90)"),
-        .nstrong = Re.init("((?:" ++ PAT_NSTRONG ++ ")[\xe1\x9f\x81-\xe1\x9f\x85]?)\xe1\x9e\xbb(?=" ++ PAT_VA ++ "|\xe1\x9f\x90)"),
-        .coengRo = Re.init("(\xe1\x9f\x92\xe1\x9e\x9a)(\xe1\x9f\x92[\xe1\x9e\x80-\xe1\x9e\xb3])"),
-        .coengDa = Re.init("\xe1\x9f\x92\xe1\x9e\x8a"),
-        .lunar1  = Re.init("(\xe1\x9f\xa1?)([\xe1\x9f\xa0-\xe1\x9f\xa9])\xe1\x9f\x92\xe1\x9f\x94"),
-        .lunar2  = Re.init("\xe1\x9f\x94\xe1\x9f\x92(\xe1\x9f\xa1?)([\xe1\x9f\xa0-\xe1\x9f\xa9])"),
-        .xhm     = Re.init("[\xe1\x9e\xb6-\xe1\x9f\x85]\xe1\x9f\x92"),
-    };
+fn coengEnds(r: []const u21, s: usize) CoengEnds {
+    const n = r.len;
+    var res = CoengEnds{ .e = .{ 0, 0 }, .n = 0 };
+    if (s + 1 < n and r[s] == COENG and isBase(r[s + 1])) {
+        res.e[res.n] = s + 2;
+        res.n += 1;
+    }
+    if (s + 3 < n and r[s] == COENG and isNonRo(r[s + 1]) and
+        r[s + 2] == COENG and isBase(r[s + 3]))
+    {
+        res.e[res.n] = s + 4;
+        res.n += 1;
+    }
+    return res;
+}
+
+// ---- strongEnds / nstrongEnds ----
+
+fn strongEnds(r: []const u21, s: usize, ctx: anytype, add: anytype) void {
+    const n = r.len;
+    if (s >= n) return;
+    if (isS1(r[s])) {
+        const pr = optRobat(r, s + 1);
+        var t: usize = 0;
+        while (t < pr.n) : (t += 1) {
+            const p = pr.p[t];
+            add(ctx, p);
+            if (p + 1 < n and r[p] == COENG and isNonBA(r[p + 1])) {
+                const q = p + 2;
+                add(ctx, q);
+                if (q + 1 < n and r[q] == COENG and isNonBA(r[q + 1])) add(ctx, q + 2);
+            }
+        }
+    }
+    if (isNonBA(r[s])) {
+        const pr = optRobat(r, s + 1);
+        var t: usize = 0;
+        while (t < pr.n) : (t += 1) {
+            const p = pr.p[t];
+            if (p + 1 < n and r[p] == COENG and isS1(r[p + 1])) {
+                const q = p + 2;
+                add(ctx, q);
+                if (q + 1 < n and r[q] == COENG and isNonBA(r[q + 1])) add(ctx, q + 2);
+            }
+            if (p + 3 < n and r[p] == COENG and isNonBA(r[p + 1]) and
+                r[p + 2] == COENG and isS1(r[p + 3])) add(ctx, p + 4);
+        }
+    }
+}
+
+fn nstrongEnds(r: []const u21, s: usize, ctx: anytype, add: anytype) void {
+    const n = r.len;
+    if (s >= n) return;
+    if (isS2(r[s])) {
+        const pr = optRobat(r, s + 1);
+        var t: usize = 0;
+        while (t < pr.n) : (t += 1) {
+            const p = pr.p[t];
+            add(ctx, p);
+            if (p + 1 < n and r[p] == COENG and isS2(r[p + 1])) {
+                const q = p + 2;
+                add(ctx, q);
+                if (q + 1 < n and r[q] == COENG and isS2(r[q + 1])) add(ctx, q + 2);
+            }
+        }
+    }
+    if (r[s] == BA) {
+        const pr = optRobat(r, s + 1);
+        var t: usize = 0;
+        while (t < pr.n) : (t += 1) {
+            const p = pr.p[t];
+            add(ctx, p);
+            const c1 = coengEnds(r, p);
+            var a: usize = 0;
+            while (a < c1.n) : (a += 1) {
+                add(ctx, c1.e[a]);
+                const c2 = coengEnds(r, c1.e[a]);
+                var b: usize = 0;
+                while (b < c2.n) : (b += 1) add(ctx, c2.e[b]);
+            }
+        }
+    }
+    if (isBase(r[s])) {
+        const pr = optRobat(r, s + 1);
+        var t: usize = 0;
+        while (t < pr.n) : (t += 1) {
+            const p = pr.p[t];
+            if (p + 3 < n and r[p] == COENG and isNonRo(r[p + 1]) and
+                r[p + 2] == COENG and r[p + 3] == BA) add(ctx, p + 4);
+            if (p + 3 < n and r[p] == COENG and r[p + 1] == BA and
+                r[p + 2] == COENG and isBase(r[p + 3])) add(ctx, p + 4);
+        }
+    }
+}
+
+// ---- canEndAt ----
+
+const CanCtx = struct { target: usize, found: bool };
+
+fn canAdd(ctx: *CanCtx, e: usize) void {
+    if (e == ctx.target) ctx.found = true;
+}
+
+fn canEndAt(r: []const u21, target: usize, comptime ends: anytype) bool {
+    var s: usize = 0;
+    while (s < target) : (s += 1) {
+        var c = CanCtx{ .target = target, .found = false };
+        ends(r, s, &c, canAdd);
+        if (c.found) return true;
+    }
+    return false;
+}
+
+// ---- vaSamyokAt: lookahead (?:VA | ័) ----
+
+fn vaSamyokAt(r: []const u21, p: usize) bool {
+    const n = r.len;
+    if (p >= n) return false;
+    const c = r[p];
+    if (c == 0x17D0) return true;
+    if (c >= 0x17B7 and c <= 0x17BA) return true;
+    if (c == 0x17BE or c == 0x17BF or c == 0x17DD) return true;
+    if (c == 0x17B6 and p + 1 < n and r[p + 1] == 0x17C6) return true;
+    return false;
+}
+
+// ---- applyShifter (mutates r in place) ----
+
+fn applyShifter(r: []u21, comptime ends: anytype, shifter: u21) void {
+    var k: usize = 0;
+    while (k < r.len) : (k += 1) {
+        if (r[k] != 0x17BB) continue;
+        const ctx = canEndAt(r, k, ends) or
+            (k >= 1 and isVPre(r[k - 1]) and canEndAt(r, k - 1, ends));
+        if (ctx and vaSamyokAt(r, k + 1)) r[k] = shifter;
+    }
+}
+
+// ---- collapseInvis: (‍?្)[្‌‍]+ -> \1 ----
+
+fn isInvis(c: u21) bool {
+    return c == COENG or c == ZWNJ or c == ZWJ;
+}
+
+fn collapseInvis(alloc: mem.Allocator, r: []const u21) ![]u21 {
+    const n = r.len;
+    var out = std.ArrayList(u21).init(alloc);
+    var i: usize = 0;
+    while (i < n) {
+        var g1_end: isize = -1;
+        if (r[i] == ZWJ and i + 1 < n and r[i + 1] == COENG) {
+            g1_end = @intCast(i + 2);
+        } else if (r[i] == COENG) {
+            g1_end = @intCast(i + 1);
+        }
+        if (g1_end >= 0) {
+            const ge: usize = @intCast(g1_end);
+            var k = ge;
+            while (k < n and isInvis(r[k])) k += 1;
+            if (k > ge) {
+                try out.appendSlice(r[i..ge]);
+                i = k;
+                continue;
+            }
+        }
+        try out.append(r[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice();
+}
+
+// ---- pairReplace / pairReplace3 ----
+
+fn pairReplace(alloc: mem.Allocator, r: []const u21, a: u21, b: u21, repl: []const u21) ![]u21 {
+    const n = r.len;
+    var out = std.ArrayList(u21).init(alloc);
+    var i: usize = 0;
+    while (i < n) {
+        if (i + 1 < n and r[i] == a and r[i + 1] == b) {
+            try out.appendSlice(repl);
+            i += 2;
+            continue;
+        }
+        try out.append(r[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice();
+}
+
+fn pairReplace3(alloc: mem.Allocator, r: []const u21, a: u21, b: u21, c: u21, repl: u21) ![]u21 {
+    const n = r.len;
+    var out = std.ArrayList(u21).init(alloc);
+    var i: usize = 0;
+    while (i < n) {
+        if (i + 2 < n and r[i] == a and r[i + 1] == b and r[i + 2] == c) {
+            try out.append(repl);
+            i += 3;
+            continue;
+        }
+        try out.append(r[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice();
+}
+
+// ---- vowelSplit: េ([ុ-ួ]?)tail -> head + \1 ----
+
+fn vowelSplit(alloc: mem.Allocator, r: []const u21, tail: u21, head: u21) ![]u21 {
+    const n = r.len;
+    var out = std.ArrayList(u21).init(alloc);
+    var i: usize = 0;
+    while (i < n) {
+        if (r[i] == 0x17C1) {
+            if (i + 2 < n and r[i + 1] >= 0x17BB and r[i + 1] <= 0x17BD and r[i + 2] == tail) {
+                try out.append(head);
+                try out.append(r[i + 1]);
+                i += 3;
+                continue;
+            }
+            if (i + 1 < n and r[i + 1] == tail) {
+                try out.append(head);
+                i += 2;
+                continue;
+            }
+        }
+        try out.append(r[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice();
+}
+
+// ---- coengRo: (្រ)(្[ក-ឳ]) -> \2\1 ----
+
+fn coengRo(alloc: mem.Allocator, r: []const u21) ![]u21 {
+    const n = r.len;
+    var out = std.ArrayList(u21).init(alloc);
+    var i: usize = 0;
+    while (i < n) {
+        if (i + 3 < n and r[i] == COENG and r[i + 1] == 0x179A and
+            r[i + 2] == COENG and r[i + 3] >= 0x1780 and r[i + 3] <= 0x17B3)
+        {
+            try out.append(r[i + 2]);
+            try out.append(r[i + 3]);
+            try out.append(r[i]);
+            try out.append(r[i + 1]);
+            i += 4;
+            continue;
+        }
+        try out.append(r[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice();
+}
+
+// ---- coengDa: (្)ដ -> \1ត ----
+
+fn coengDa(alloc: mem.Allocator, r: []const u21) ![]u21 {
+    const n = r.len;
+    var out = std.ArrayList(u21).init(alloc);
+    var i: usize = 0;
+    while (i < n) {
+        if (i + 1 < n and r[i] == COENG and r[i + 1] == 0x178A) {
+            try out.append(COENG);
+            try out.append(0x178F);
+            i += 2;
+            continue;
+        }
+        try out.append(r[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice();
+}
+
+// ---- lunar1: (១?)([០-៩])្។ -> lunar symbol (base U+19E0) ----
+
+fn lunar1(alloc: mem.Allocator, r: []const u21) ![]u21 {
+    const n = r.len;
+    var out = std.ArrayList(u21).init(alloc);
+    var i: usize = 0;
+    while (i < n) {
+        if (r[i] == 0x17E1 and i + 3 < n and isDigit(r[i + 1]) and
+            r[i + 2] == COENG and r[i + 3] == 0x17D4)
+        {
+            const v: u21 = 10 + (r[i + 1] - 0x17E0);
+            if (v > 15) try out.appendSlice(r[i .. i + 4])
+            else try out.append(0x19E0 + v);
+            i += 4;
+            continue;
+        }
+        if (i + 2 < n and isDigit(r[i]) and r[i + 1] == COENG and r[i + 2] == 0x17D4) {
+            try out.append(0x19E0 + (r[i] - 0x17E0));
+            i += 3;
+            continue;
+        }
+        try out.append(r[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice();
+}
+
+// ---- lunar2: ។្(១?)([០-៩]) -> lunar symbol (base U+19F0) ----
+
+fn lunar2(alloc: mem.Allocator, r: []const u21) ![]u21 {
+    const n = r.len;
+    var out = std.ArrayList(u21).init(alloc);
+    var i: usize = 0;
+    while (i < n) {
+        if (r[i] == 0x17D4 and i + 1 < n and r[i + 1] == COENG) {
+            if (i + 3 < n and r[i + 2] == 0x17E1 and isDigit(r[i + 3])) {
+                const v: u21 = 10 + (r[i + 3] - 0x17E0);
+                if (v > 15) try out.appendSlice(r[i .. i + 4])
+                else try out.append(0x19F0 + v);
+                i += 4;
+                continue;
+            }
+            if (i + 2 < n and isDigit(r[i + 2])) {
+                try out.append(0x19F0 + (r[i + 2] - 0x17E0));
+                i += 3;
+                continue;
+            }
+        }
+        try out.append(r[i]);
+        i += 1;
+    }
+    return out.toOwnedSlice();
+}
+
+// ---- hasByteE1: SWAR scan for byte 0xE1 ----
+
+fn hasByteE1(s: []const u8) bool {
+    const lo: u64 = 0x0101010101010101;
+    const hi: u64 = 0x8080808080808080;
+    const mask: u64 = 0xE1E1E1E1E1E1E1E1;
+    var i: usize = 0;
+    while (i + 8 <= s.len) : (i += 8) {
+        const w: u64 = @as(u64, s[i]) | @as(u64, s[i + 1]) << 8 |
+            @as(u64, s[i + 2]) << 16 | @as(u64, s[i + 3]) << 24 |
+            @as(u64, s[i + 4]) << 32 | @as(u64, s[i + 5]) << 40 |
+            @as(u64, s[i + 6]) << 48 | @as(u64, s[i + 7]) << 56;
+        const x = w ^ mask;
+        if ((x -% lo) & ~x & hi != 0) return true;
+    }
+    while (i < s.len) : (i += 1) {
+        if (s[i] == 0xE1) return true;
+    }
+    return false;
 }
 
 // ---- Sort context (insertionContext API: operates on index positions) ----
 
 const SortCtx = struct {
-    cats:    []Cat,
+    cats: []Cat,
     indices: []usize,
 
     pub fn lessThan(ctx: SortCtx, a: usize, b: usize) bool {
-        const ia = ctx.indices[a]; const ib = ctx.indices[b];
+        const ia = ctx.indices[a];
+        const ib = ctx.indices[b];
         const ca = @intFromEnum(ctx.cats[ia]);
         const cb = @intFromEnum(ctx.cats[ib]);
         return if (ca != cb) ca < cb else ia < ib;
@@ -273,91 +523,131 @@ const SortCtx = struct {
 
 /// Caller owns the returned slice; free with alloc.free().
 pub fn normalize(alloc: mem.Allocator, txt: []const u8, lang: []const u8) ![]u8 {
-    ensureInit();
-    const R = &g_patterns;
+    // SWAR skip/scan fast path: no Khmer byte => identity.
+    if (!hasByteE1(txt)) return alloc.dupe(u8, txt);
 
-    var owned: ?[]u8 = null;
-    var input: []const u8 = txt;
+    // Decode UTF-8 to code points.
+    var raw = std.ArrayList(u21).init(alloc);
+    defer raw.deinit();
+    {
+        var p: usize = 0;
+        while (p < txt.len) {
+            const r = u8dec(txt[p..]);
+            try raw.append(r.cp);
+            p += r.len;
+        }
+    }
+
+    // XHM pre-step: insert U+200D before each [U+17B6-U+17C5] U+17D2 sequence.
+    var cps = std.ArrayList(u21).init(alloc);
+    defer cps.deinit();
     if (mem.eql(u8, lang, "xhm")) {
-        owned = try subStr(R.xhm, alloc, txt, "\xe2\x80\x8d$0");
-        input = owned.?;
+        var k: usize = 0;
+        while (k < raw.items.len) : (k += 1) {
+            if (raw.items[k] >= 0x17B6 and raw.items[k] <= 0x17C5 and
+                k + 1 < raw.items.len and raw.items[k + 1] == 0x17D2)
+                try cps.append(0x200D);
+            try cps.append(raw.items[k]);
+        }
+    } else {
+        try cps.appendSlice(raw.items);
     }
-    defer if (owned) |o| alloc.free(o);
 
-    // Decode
-    var cps  = std.ArrayList(u21).init(alloc); defer cps.deinit();
-    var cats = std.ArrayList(Cat).init(alloc);  defer cats.deinit();
-    var p: usize = 0;
-    while (p < input.len) {
-        const r = u8dec(input[p..]);
-        try cps.append(r.cp);
-        try cats.append(charcat(r.cp));
-        p += r.len;
-    }
     const n = cps.items.len;
+    var cats = std.ArrayList(Cat).init(alloc);
+    defer cats.deinit();
+    try cats.resize(n);
+    for (0..n) |k| cats.items[k] = charcat(cps.items[k]);
 
-    // Recategorise
+    // Recategorise.
     for (1..n) |i| {
         const prev = cps.items[i - 1];
-        if (prev == 0x200D or prev == 0x17D2) {
-            if (cats.items[i] == .base or cats.items[i] == .zfcoeng)
+        if (prev == ZWJ or prev == COENG) {
+            if (cats.items[i] == .base or cats.items[i] == .coeng)
                 cats.items[i] = cats.items[i - 1];
         }
     }
 
-    // Process
-    var out     = std.ArrayList(u8).init(alloc);
-    var indices = std.ArrayList(usize).init(alloc); defer indices.deinit();
+    var out = std.ArrayList(u8).init(alloc);
+    var indices = std.ArrayList(usize).init(alloc);
+    defer indices.deinit();
 
     var i: usize = 0;
     while (i < n) {
-        if (cats.items[i] != .base) { try appendCP(&out, cps.items[i]); i += 1; continue; }
+        if (cats.items[i] != .base) {
+            try appendCP(&out, cps.items[i]);
+            i += 1;
+            continue;
+        }
         var j = i + 1;
         while (j < n and @intFromEnum(cats.items[j]) > @intFromEnum(Cat.base)) : (j += 1) {}
 
-        try indices.resize(j - i);
-        for (0..j - i) |k| indices.items[k] = i + k;
-        std.sort.insertionContext(0, indices.items.len, SortCtx{
-            .cats = cats.items, .indices = indices.items,
+        const slen = j - i;
+        try indices.resize(slen);
+        for (0..slen) |k| indices.items[k] = i + k;
+        std.sort.insertionContext(0, slen, SortCtx{
+            .cats = cats.items,
+            .indices = indices.items,
         });
 
-        var syl = std.ArrayList(u8).init(alloc);
-        for (indices.items) |k| try appendCP(&syl, cps.items[k]);
-        var s = try syl.toOwnedSlice();
+        var syl = try alloc.alloc(u21, slen);
+        for (0..slen) |k| syl[k] = cps.items[indices.items[k]];
 
-        inline for (.{
-            .{ R.invis,   "$1" },
-            .{ R.vbe,     "\xe1\x9f\x84\xe1\x9e\xb8" },
-            .{ R.v1,      "\xe1\x9e\xbe$1" },
-            .{ R.v2,      "\xe1\x9f\x84$1" },
-            .{ R.v3,      "$2$1" },
-            .{ R.strong,  "$1\xe1\x9f\x8a" },
-            .{ R.nstrong, "$1\xe1\x9f\x89" },
-            .{ R.coengRo, "$2$1" },
-            .{ R.coengDa, "\xe1\x9f\x92\xe1\x9e\x8f" },
-        }) |pair| {
-            const ns = try subStr(pair[0], alloc, s, pair[1]);
-            alloc.free(s); s = ns;
+        {
+            const t = try collapseInvis(alloc, syl);
+            alloc.free(syl);
+            syl = t;
+        }
+        {
+            const t = try pairReplace(alloc, syl, 0x17BE, 0x17B6, &[_]u21{ 0x17C4, 0x17B8 });
+            alloc.free(syl);
+            syl = t;
+        }
+        {
+            const t = try vowelSplit(alloc, syl, 0x17B8, 0x17BE);
+            alloc.free(syl);
+            syl = t;
+        }
+        {
+            const t = try vowelSplit(alloc, syl, 0x17B6, 0x17C4);
+            alloc.free(syl);
+            syl = t;
+        }
+        {
+            const t = try pairReplace(alloc, syl, 0x17BE, 0x17BB, &[_]u21{ 0x17BB, 0x17BE });
+            alloc.free(syl);
+            syl = t;
+        }
+        applyShifter(syl, strongEnds, 0x17CA);
+        applyShifter(syl, nstrongEnds, 0x17C9);
+        {
+            const t = try coengRo(alloc, syl);
+            alloc.free(syl);
+            syl = t;
+        }
+        {
+            const t = try coengDa(alloc, syl);
+            alloc.free(syl);
+            syl = t;
+        }
+        {
+            const t = try lunar1(alloc, syl);
+            alloc.free(syl);
+            syl = t;
+        }
+        {
+            const t = try lunar2(alloc, syl);
+            alloc.free(syl);
+            syl = t;
+        }
+        {
+            const t = try pairReplace3(alloc, syl, 0x17D4, 0x17D2, 0x17D4, 0x19F0);
+            alloc.free(syl);
+            syl = t;
         }
 
-        const ns1 = try subLunar(R.lunar1, alloc, s, 0x19E0); alloc.free(s); s = ns1;
-        const ns2 = try subLunar(R.lunar2, alloc, s, 0x19F0); alloc.free(s); s = ns2;
-
-        const khan = "\xe1\x9f\x94\xe1\x9f\x92\xe1\x9f\x94";
-        if (mem.indexOf(u8, s, khan) != null) {
-            var rep = std.ArrayList(u8).init(alloc);
-            var pos2: usize = 0;
-            while (mem.indexOf(u8, s[pos2..], khan)) |idx| {
-                try rep.appendSlice(s[pos2 .. pos2 + idx]);
-                try rep.appendSlice("\xe1\xa7\xb0");
-                pos2 += idx + khan.len;
-            }
-            try rep.appendSlice(s[pos2..]);
-            alloc.free(s); s = try rep.toOwnedSlice();
-        }
-
-        try out.appendSlice(s);
-        alloc.free(s);
+        for (syl) |cp| try appendCP(&out, cp);
+        alloc.free(syl);
         i = j;
     }
     return out.toOwnedSlice();
