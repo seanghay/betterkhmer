@@ -2,11 +2,7 @@
 
 Khmer Unicode normalizer.
 
-## Install
-
-```bash
-dart pub add betterkhmer
-```
+Not published to a package registry — copy `dart/betterkhmer/lib/betterkhmer.dart` into your project.
 
 ## Usage
 

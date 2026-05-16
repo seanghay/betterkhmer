@@ -2,11 +2,7 @@
 
 Khmer Unicode normalizer.
 
-## Install
-
-```bash
-composer require betterkhmer/betterkhmer
-```
+Not published to a package registry — copy `php/betterkhmer/src/BetterKhmer.php` into your project.
 
 ## Usage
 

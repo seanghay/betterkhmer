@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>BetterKhmer</RootNamespace>
+    <RemoveIntegerChecks>true</RemoveIntegerChecks>
+    <OptionStrict>On</OptionStrict>
+  </PropertyGroup>
+
+</Project>

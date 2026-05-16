@@ -2,12 +2,7 @@
 
 Khmer Unicode normalizer.
 
-## Install
-
-```toml
-[dependencies]
-betterkhmer = "0.1"
-```
+Not published to a package registry — copy `rust/betterkhmer/src/lib.rs` into your project.
 
 ## Usage
 

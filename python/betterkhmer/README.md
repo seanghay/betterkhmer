@@ -2,11 +2,7 @@
 
 Khmer Unicode normalizer.
 
-## Install
-
-```bash
-pip install betterkhmer
-```
+Not published to a package registry — copy `python/betterkhmer/src/betterkhmer/__init__.py` into your project.
 
 ## Usage
 
