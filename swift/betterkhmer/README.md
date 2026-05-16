@@ -2,13 +2,7 @@
 
 Khmer Unicode normalizer.
 
-## Install
-
-Add to `Package.swift`:
-
-```swift
-.package(url: "https://github.com/seanghay/betterkhmer-swift", from: "1.0.0")
-```
+Not published to a package registry — copy `swift/betterkhmer/Sources/BetterKhmer/BetterKhmer.swift` into your project.
 
 ## Usage
 

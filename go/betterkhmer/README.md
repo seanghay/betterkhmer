@@ -2,11 +2,7 @@
 
 Khmer Unicode normalizer.
 
-## Install
-
-```bash
-go get github.com/seanghay/betterkhmer
-```
+Not published to a package registry — copy `go/betterkhmer/betterkhmer.go` into your project.
 
 ## Usage
 

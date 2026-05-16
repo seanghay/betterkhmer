@@ -2,11 +2,7 @@
 
 Khmer Unicode normalizer.
 
-## Install
-
-```bash
-gem install betterkhmer
-```
+Not published to a package registry — copy `ruby/betterkhmer/lib/betterkhmer.rb` into your project.
 
 ## Usage
 

@@ -1,6 +1,6 @@
 # BetterKhmer
 
-Khmer Unicode normalizer ported to 14 languages. All implementations expose a single `normalize()` function and pass the same 10,085-line fixture suite.
+Khmer Unicode normalizer ported to 18 languages. All implementations expose a single `normalize()` function and pass the same 10,085-line fixture suite.
 
 Normalizes Khmer text according to the proposed normal encoding structure at https://www.unicode.org/L2/L2022/22290-khmer-encoding.pdf. It does not attempt to identify faulty text — it ensures two strings that would render the same are output as the same string.
 
@@ -15,23 +15,30 @@ Based on the original [khmer-normalizer](https://github.com/seanghay/khmer-norma
 
 ## Languages
 
-| Language   | Directory              | Install / Build |
-|------------|------------------------|-----------------|
-| Python     | `python/betterkhmer`   | `pip install betterkhmer` |
-| Go         | `go/betterkhmer`       | `go get github.com/seanghay/betterkhmer` |
-| Rust       | `rust/betterkhmer`     | `cargo add betterkhmer` |
-| Swift      | `swift/betterkhmer`    | Swift Package Manager |
-| Dart       | `dart/betterkhmer`     | `dart pub add betterkhmer` |
-| Ruby       | `ruby/betterkhmer`     | `gem install betterkhmer` |
-| PHP        | `php/betterkhmer`      | `composer require betterkhmer/betterkhmer` |
-| Java       | `java/betterkhmer`     | Maven / Gradle |
-| Kotlin     | `kotlin/betterkhmer`   | Gradle |
-| C#         | `csharp/betterkhmer`   | `dotnet add package BetterKhmer` |
-| C          | `c/betterkhmer`        | CMake + PCRE2 |
-| C++        | `cpp/betterkhmer`      | CMake + PCRE2 |
-| TypeScript | `typescript/betterkhmer` | `npm install betterkhmer` |
-| Zig        | `zig/betterkhmer`      | `zig build` + PCRE2 |
-| Perl       | `perl/betterkhmer`     | `perl -Ilib` |
+**This is not published to any package registry.** Each port is one
+self-contained source file — copy it straight into your project.
+
+| Language    | Source file (copy into your project) |
+|-------------|--------------------------------------|
+| Python      | `python/betterkhmer/src/betterkhmer/__init__.py` |
+| Go          | `go/betterkhmer/betterkhmer.go` |
+| Rust        | `rust/betterkhmer/src/lib.rs` |
+| Swift       | `swift/betterkhmer/Sources/BetterKhmer/BetterKhmer.swift` |
+| Dart        | `dart/betterkhmer/lib/betterkhmer.dart` |
+| Ruby        | `ruby/betterkhmer/lib/betterkhmer.rb` |
+| PHP         | `php/betterkhmer/src/BetterKhmer.php` |
+| Java        | `java/betterkhmer/src/main/java/com/betterkhmer/BetterKhmer.java` |
+| Kotlin      | `kotlin/betterkhmer/src/main/kotlin/com/betterkhmer/BetterKhmer.kt` |
+| C#          | `csharp/betterkhmer/src/BetterKhmer.cs` |
+| C           | `c/betterkhmer/src/betterkhmer.c` (+ `.h`) |
+| C++         | `cpp/betterkhmer/src/betterkhmer.cpp` (+ `.hpp`) |
+| TypeScript  | `typescript/betterkhmer/src/index.ts` |
+| Zig         | `zig/betterkhmer/src/betterkhmer.zig` |
+| Perl        | `perl/betterkhmer/lib/BetterKhmer.pm` |
+| Elixir      | `elixir/betterkhmer/lib/betterkhmer.ex` |
+| VB.NET      | `vbnet/betterkhmer/src/BetterKhmer.vb` |
+| Objective-C | `objc/betterkhmer/src/BetterKhmer.m` (+ `.h`) |
+| Lua         | `lua/betterkhmer/betterkhmer.lua` |
 
 ## API
 
@@ -57,7 +64,7 @@ import { normalize } from 'betterkhmer';
 const result = normalize('ខ្មែរ');
 ```
 
-See the per-language `README.md` in each subdirectory for install and usage details.
+See the per-language `README.md` in each subdirectory for usage and test details.
 
 ## Why this exists
 

@@ -1,11 +1,11 @@
 // Copyright (c) 2021-2024, SIL Global. Licensed under MIT license.
 // Ported to TypeScript — betterkhmer package. Regex-free.
 
-const enum Cat {
-  Other = 0, Base = 1, Robat = 2, Coeng = 3,
-  Shift = 4, Z = 5, VPre = 6, VB = 7, VA = 8,
-  VPost = 9, MS = 10, MF = 11, ZFCoeng = 12,
-}
+const Cat = {
+  Other: 0, Base: 1, Robat: 2, Coeng: 3,
+  Shift: 4, Z: 5, VPre: 6, VB: 7, VA: 8,
+  VPost: 9, MS: 10, MF: 11, ZFCoeng: 12,
+} as const;
 
 const CATEGORIES: Uint8Array = (() => {
   const c = new Uint8Array(0x17DE - 0x1780);
@@ -26,8 +26,8 @@ const CATEGORIES: Uint8Array = (() => {
   return c;
 })();
 
-function charcat(cp: number): Cat {
-  if (cp >= 0x1780 && cp <= 0x17DD) return CATEGORIES[cp - 0x1780] as Cat;
+function charcat(cp: number): number {
+  if (cp >= 0x1780 && cp <= 0x17DD) return CATEGORIES[cp - 0x1780];
   if (cp === 0x200C) return Cat.Z;
   if (cp === 0x200D) return Cat.ZFCoeng;
   return Cat.Other;
@@ -366,26 +366,32 @@ function hasKhmer(cps: number[]): boolean {
 
 /** Returns the Khmer-normalized form of txt. */
 export function normalize(txt: string, lang = 'km'): string {
+  let cps: number[] = [];
+  for (const ch of txt) {
+    const cp = ch.codePointAt(0);
+    if (cp !== undefined) cps.push(cp);
+  }
+
+  // No Khmer codepoint => identity (matches the Go SWAR fast path).
+  if (!hasKhmer(cps)) return txt;
+
   if (lang === 'xhm') {
     // [ា-ៅ]្  ->  ‍ + match  (U+17B6..U+17C5 followed by U+17D2)
-    const src = [...txt].map(c => c.codePointAt(0)!);
     const tmp: number[] = [];
-    for (let p = 0; p < src.length; p++) {
-      if (src[p] >= 0x17B6 && src[p] <= 0x17C5 && p + 1 < src.length && src[p + 1] === 0x17D2) {
-        tmp.push(ZWJ, src[p], 0x17D2);
+    for (let p = 0; p < cps.length; p++) {
+      if (cps[p] >= 0x17B6 && cps[p] <= 0x17C5 && p + 1 < cps.length && cps[p + 1] === 0x17D2) {
+        tmp.push(ZWJ, cps[p], 0x17D2);
         p++;
         continue;
       }
-      tmp.push(src[p]);
+      tmp.push(cps[p]);
     }
-    txt = String.fromCodePoint(...tmp);
+    cps = tmp;
   }
 
-  const cps = [...txt].map(c => c.codePointAt(0)!);
   const n = cps.length;
-  if (!hasKhmer(cps)) return txt;
-
-  const cats: Cat[] = cps.map(charcat);
+  const cats: number[] = new Array(n);
+  for (let i = 0; i < n; i++) cats[i] = charcat(cps[i]);
 
   for (let i = 1; i < n; i++) {
     if (cps[i - 1] === 0x200D || cps[i - 1] === 0x17D2) {
@@ -400,10 +406,12 @@ export function normalize(txt: string, lang = 'km'): string {
     let j = i + 1;
     while (j < n && cats[j] > Cat.Base) j++;
 
-    const indices = Array.from({ length: j - i }, (_, k) => i + k);
+    const indices: number[] = [];
+    for (let k = i; k < j; k++) indices.push(k);
     indices.sort((a, b) => cats[a] !== cats[b] ? cats[a] - cats[b] : a - b);
 
-    let syl = indices.map(k => cps[k]);
+    let syl: number[] = [];
+    for (let k = 0; k < indices.length; k++) syl.push(cps[indices[k]]);
 
     syl = collapseInvis(syl);
     syl = pairReplace(syl, 0x17BE, 0x17B6, 0x17C4, 0x17B8); // ើា -> ោី
