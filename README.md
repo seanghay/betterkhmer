@@ -106,6 +106,42 @@ Further reading: [Order and Disorder in Unicode](https://lontar.eu/en/notes/orde
 python3 scripts/gen_fixtures.py
 ```
 
+## Benchmark
+
+Most ports were rewritten from a regex implementation to an explicit,
+regex-free one. Each port was measured on the same corpus — all 10,085
+`fixtures/input.txt` lines, in memory, warmup passes then K timed passes,
+**only the normalize loop timed**; output checksums were identical between
+the two builds, so behaviour is unchanged.
+
+| Language    | regex (ms/pass) | regex-free (ms/pass) | speedup |
+|-------------|----------------:|---------------------:|--------:|
+| Swift       | 5634.42 | 489.86  | **11.5×** |
+| C           | 1203.63 | 207.51  | **5.8×** |
+| C++         | 1136.53 | 227.32  | **5.0×** |
+| Zig         | 1374.97 | 293.27  | **4.7×** |
+| Go          |  878.30 | 194.33  | **4.5×** |
+| Java        |  448.73 | 118.00  | **3.8×** |
+| Dart        |  842.18 | 269.15  | **3.1×** |
+| TypeScript  |  928.28 | 360.93  | **2.6×** |
+| Rust        |  610.65 | 238.17  | **2.6×** |
+| Kotlin      |  449.53 | 186.83  | **2.4×** |
+| Python      | 4142.59 | 2550.05 | **1.6×** |
+| C#          |  238.04 | 215.37  | **1.1×** |
+| Ruby        | 2069.67 | 2659.23 | 0.78× (slower) |
+| PHP         | 1444.79 | 2110.74 | 0.68× (slower) |
+| Perl        | 2624.61 | 5223.53 | 0.50× (slower) |
+
+Regex-free is a large win for every compiled/JIT language. **Ruby, PHP, and
+Perl stay on regex** — their native regex engines beat a hand-rolled
+interpreted loop, so the regex version is kept there. Elixir, VB.NET,
+Objective-C, and Lua were written regex-free from the start (no comparison).
+
+Caveats: only the within-language ratio is meaningful — absolute ms are not
+comparable across languages (K differs; JVM/.NET checksums count UTF-16
+units while native ports count UTF-8 bytes). Zig was measured with
+`c_allocator` on both sides to isolate the algorithm from the allocator.
+
 ## License
 
 MIT
