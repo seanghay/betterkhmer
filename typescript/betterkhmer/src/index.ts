@@ -1,5 +1,5 @@
 // Copyright (c) 2021-2024, SIL Global. Licensed under MIT license.
-// Ported to TypeScript — betterkhmer package.
+// Ported to TypeScript — betterkhmer package. Regex-free.
 
 const enum Cat {
   Other = 0, Base = 1, Robat = 2, Coeng = 3,
@@ -33,50 +33,358 @@ function charcat(cp: number): Cat {
   return Cat.Other;
 }
 
-const S1    = String.raw`[ក-ឃច-ឈដ-ឍត-ធផ-ភឞ-ហអ]`;
-const NonBA = String.raw`[ក-នផ-អឥ-ឳ]`;
-const S2    = String.raw`[ងកណនបម-ឝឡឣ-ឳ]`;
-const NonRo = String.raw`[ក-យល-អឥ-ឳ]`;
-const B     = String.raw`[ក-អឥ-ឳ◌]`;
-const VA    = String.raw`(?:[ិ-ឺើឿ៝]|ាំ)`;
-const COENG = `(?:(?:្${NonRo})?្${B})`;
+// --- Khmer consonant classes (from the SIL reference khres) ---
 
-const STRONG =
-  `${S1}៌?(?:្${NonBA}(?:្${NonBA})?)?` +
-  `|${NonBA}៌?(?:្${S1}(?:្${NonBA})?|្${NonBA}្${S1})`;
+const ZWNJ = 0x200C;
+const ZWJ = 0x200D;
+const COENG = 0x17D2;
+const ROBAT = 0x17CC;
+const BA = 0x1794;
 
-const NSTRONG =
-  `(?:${S2}៌?(?:្${S2}(?:្${S2})?)?` +
-  `|ប៌?(?:${COENG}(?:${COENG})?)?` +
-  `|${B}៌?(?:្${NonRo}្ប|្ប(?:្${B})))`;
+// B: all bases (incl. dotted circle).
+function isBase(cp: number): boolean {
+  return (cp >= 0x1780 && cp <= 0x17A2) || (cp >= 0x17A5 && cp <= 0x17B3) || cp === 0x25CC;
+}
 
-const reInvis   = new RegExp(String.raw`(‍?្)[្‌‍]+`, 'gu');
-const reVBE     = /ើា/gu;
-const reV1      = /េ([ុ-ួ]?)ី/gu;
-const reV2      = /េ([ុ-ួ]?)ា/gu;
-const reV3      = /(ើ)(ុ)/gu;
-const reStrong  = new RegExp(`((?:${STRONG})[\\u17C1-\\u17C5]?)ុ(?=${VA}|័)`, 'gu');
-const reNStrong = new RegExp(`((?:${NSTRONG})[\\u17C1-\\u17C5]?)ុ(?=${VA}|័)`, 'gu');
-const reCoengRo = /(្រ)(្[ក-ឳ])/gu;
-const reCoengDa = /្ដ/gu;
-const reLunar1  = /(១?)([០-៩])្។/gu;
-const reLunar2  = /។្(១?)([០-៩])/gu;
+// NonRo: consonants excluding Ro (U+179A).
+function isNonRo(cp: number): boolean {
+  return (cp >= 0x1780 && cp <= 0x1799) || (cp >= 0x179B && cp <= 0x17A2) || (cp >= 0x17A5 && cp <= 0x17B3);
+}
 
-function lunarReplace(d1: string, d2: string, base: number): string {
-  const v1 = d1 ? d1.codePointAt(0)! - 0x17E0 : 0;
-  const v = v1 * 10 + d2.codePointAt(0)! - 0x17E0;
-  if (v > 15) return null as unknown as string;
-  return String.fromCodePoint(base + v);
+// NonBA: consonants excluding Ba (U+1794).
+function isNonBA(cp: number): boolean {
+  return (cp >= 0x1780 && cp <= 0x1793) || (cp >= 0x1795 && cp <= 0x17A2) || (cp >= 0x17A5 && cp <= 0x17B3);
+}
+
+// S1: series-1 consonants.
+function isS1(cp: number): boolean {
+  return (cp >= 0x1780 && cp <= 0x1783) ||
+    (cp >= 0x1785 && cp <= 0x1788) ||
+    (cp >= 0x178A && cp <= 0x178D) ||
+    (cp >= 0x178F && cp <= 0x1792) ||
+    (cp >= 0x1795 && cp <= 0x1797) ||
+    (cp >= 0x179E && cp <= 0x17A0) ||
+    cp === 0x17A2;
+}
+
+// S2: series-2 consonants.
+function isS2(cp: number): boolean {
+  return cp === 0x1780 || cp === 0x1784 || cp === 0x178E || cp === 0x1793 ||
+    cp === 0x1794 || cp === 0x17A1 ||
+    (cp >= 0x1798 && cp <= 0x179D) ||
+    (cp >= 0x17A3 && cp <= 0x17B3);
+}
+
+function isVPre(cp: number): boolean { return cp >= 0x17C1 && cp <= 0x17C5; }
+
+// optRobat returns the position(s) after an optional Robat at p.
+function optRobat(r: number[], p: number): number[] {
+  if (p < r.length && r[p] === ROBAT) return [p, p + 1];
+  return [p];
+}
+
+// coengEnds enumerates end indices of one COENG: (?:(?:្ NonRo)? ្ B)
+function coengEnds(r: number[], s: number): number[] {
+  const n = r.length;
+  const res: number[] = [];
+  if (s + 1 < n && r[s] === COENG && isBase(r[s + 1])) res.push(s + 2);
+  if (s + 3 < n && r[s] === COENG && isNonRo(r[s + 1]) && r[s + 2] === COENG && isBase(r[s + 3])) res.push(s + 4);
+  return res;
+}
+
+// strongEnds enumerates all end indices of a STRONG match starting at s.
+function strongEnds(r: number[], s: number, add: (e: number) => void): void {
+  const n = r.length;
+  if (s >= n) return;
+  if (isS1(r[s])) {
+    for (const p of optRobat(r, s + 1)) {
+      add(p);
+      if (p + 1 < n && r[p] === COENG && isNonBA(r[p + 1])) {
+        const q = p + 2;
+        add(q);
+        if (q + 1 < n && r[q] === COENG && isNonBA(r[q + 1])) add(q + 2);
+      }
+    }
+  }
+  if (isNonBA(r[s])) {
+    for (const p of optRobat(r, s + 1)) {
+      if (p + 1 < n && r[p] === COENG && isS1(r[p + 1])) {
+        const q = p + 2;
+        add(q);
+        if (q + 1 < n && r[q] === COENG && isNonBA(r[q + 1])) add(q + 2);
+      }
+      if (p + 3 < n && r[p] === COENG && isNonBA(r[p + 1]) && r[p + 2] === COENG && isS1(r[p + 3])) add(p + 4);
+    }
+  }
+}
+
+// nstrongEnds enumerates all end indices of an NSTRONG match starting at s.
+function nstrongEnds(r: number[], s: number, add: (e: number) => void): void {
+  const n = r.length;
+  if (s >= n) return;
+  if (isS2(r[s])) {
+    for (const p of optRobat(r, s + 1)) {
+      add(p);
+      if (p + 1 < n && r[p] === COENG && isS2(r[p + 1])) {
+        const q = p + 2;
+        add(q);
+        if (q + 1 < n && r[q] === COENG && isS2(r[q + 1])) add(q + 2);
+      }
+    }
+  }
+  if (r[s] === BA) {
+    for (const p of optRobat(r, s + 1)) {
+      add(p);
+      for (const e1 of coengEnds(r, p)) {
+        add(e1);
+        for (const e2 of coengEnds(r, e1)) add(e2);
+      }
+    }
+  }
+  if (isBase(r[s])) {
+    for (const p of optRobat(r, s + 1)) {
+      if (p + 3 < n && r[p] === COENG && isNonRo(r[p + 1]) && r[p + 2] === COENG && r[p + 3] === BA) add(p + 4);
+      if (p + 3 < n && r[p] === COENG && r[p + 1] === BA && r[p + 2] === COENG && isBase(r[p + 3])) add(p + 4);
+    }
+  }
+}
+
+// canEndAt reports whether some match (per ends) starting anywhere ends exactly at target.
+function canEndAt(r: number[], target: number,
+                  ends: (r: number[], s: number, add: (e: number) => void) => void): boolean {
+  for (let s = 0; s < target; s++) {
+    let found = false;
+    ends(r, s, (e) => { if (e === target) found = true; });
+    if (found) return true;
+  }
+  return false;
+}
+
+// vaSamyokAt is the lookahead (?:VA | ័):
+// VA = (?:[ិ-ឺើឿ៝] | ាំ)
+function vaSamyokAt(r: number[], p: number): boolean {
+  const n = r.length;
+  if (p >= n) return false;
+  const c = r[p];
+  if (c === 0x17D0) return true;
+  if (c >= 0x17B7 && c <= 0x17BA) return true;
+  if (c === 0x17BE || c === 0x17BF || c === 0x17DD) return true;
+  if (c === 0x17B6 && p + 1 < n && r[p + 1] === 0x17C6) return true;
+  return false;
+}
+
+// applyShifter replaces ((?:CLASS)[េ-ៅ]?)ុ(?=VA|័) with the shifter.
+function applyShifter(r: number[],
+                      ends: (r: number[], s: number, add: (e: number) => void) => void,
+                      shifter: number): void {
+  for (let k = 0; k < r.length; k++) {
+    if (r[k] !== 0x17BB) continue;
+    const ctx = canEndAt(r, k, ends) ||
+      (k >= 1 && isVPre(r[k - 1]) && canEndAt(r, k - 1, ends));
+    if (ctx && vaSamyokAt(r, k + 1)) r[k] = shifter;
+  }
+}
+
+// collapseInvis: (‍?្)[្‌‍]+ -> \1
+function collapseInvis(r: number[]): number[] {
+  const n = r.length;
+  const isInvis = (c: number) => c === COENG || c === ZWNJ || c === ZWJ;
+  const out: number[] = [];
+  let i = 0;
+  while (i < n) {
+    let g1End = -1;
+    if (r[i] === ZWJ && i + 1 < n && r[i + 1] === COENG) g1End = i + 2;
+    else if (r[i] === COENG) g1End = i + 1;
+    if (g1End >= 0) {
+      let k = g1End;
+      while (k < n && isInvis(r[k])) k++;
+      if (k > g1End) {
+        for (let p = i; p < g1End; p++) out.push(r[p]);
+        i = k;
+        continue;
+      }
+    }
+    out.push(r[i]);
+    i++;
+  }
+  return out;
+}
+
+// pairReplace replaces every non-overlapping [a,b] with the codepoints in repl.
+function pairReplace(r: number[], a: number, b: number, ...repl: number[]): number[] {
+  const n = r.length;
+  const out: number[] = [];
+  for (let i = 0; i < n;) {
+    if (i + 1 < n && r[i] === a && r[i + 1] === b) {
+      for (const x of repl) out.push(x);
+      i += 2;
+      continue;
+    }
+    out.push(r[i]);
+    i++;
+  }
+  return out;
+}
+
+// pairReplace3 replaces every non-overlapping [a,b,c] with repl.
+function pairReplace3(r: number[], a: number, b: number, c: number, repl: number): number[] {
+  const n = r.length;
+  const out: number[] = [];
+  for (let i = 0; i < n;) {
+    if (i + 2 < n && r[i] === a && r[i + 1] === b && r[i + 2] === c) {
+      out.push(repl);
+      i += 3;
+      continue;
+    }
+    out.push(r[i]);
+    i++;
+  }
+  return out;
+}
+
+// vowelSplit: េ([ុ-ួ]?)tail -> head + \1   (reV1/reV2)
+function vowelSplit(r: number[], tail: number, head: number): number[] {
+  const n = r.length;
+  const out: number[] = [];
+  for (let i = 0; i < n;) {
+    if (r[i] === 0x17C1) {
+      if (i + 2 < n && r[i + 1] >= 0x17BB && r[i + 1] <= 0x17BD && r[i + 2] === tail) {
+        out.push(head, r[i + 1]);
+        i += 3;
+        continue;
+      }
+      if (i + 1 < n && r[i + 1] === tail) {
+        out.push(head);
+        i += 2;
+        continue;
+      }
+    }
+    out.push(r[i]);
+    i++;
+  }
+  return out;
+}
+
+// coengRo: (្រ)(្[ក-ឳ]) -> \2\1
+function coengRo(r: number[]): number[] {
+  const n = r.length;
+  const out: number[] = [];
+  for (let i = 0; i < n;) {
+    if (i + 3 < n && r[i] === COENG && r[i + 1] === 0x179A &&
+        r[i + 2] === COENG && r[i + 3] >= 0x1780 && r[i + 3] <= 0x17B3) {
+      out.push(r[i + 2], r[i + 3], r[i], r[i + 1]);
+      i += 4;
+      continue;
+    }
+    out.push(r[i]);
+    i++;
+  }
+  return out;
+}
+
+// coengDa: (្)ដ -> \1ត
+function coengDa(r: number[]): number[] {
+  const n = r.length;
+  const out: number[] = [];
+  for (let i = 0; i < n;) {
+    if (i + 1 < n && r[i] === COENG && r[i + 1] === 0x178A) {
+      out.push(COENG, 0x178F);
+      i += 2;
+      continue;
+    }
+    out.push(r[i]);
+    i++;
+  }
+  return out;
+}
+
+function isDigit(cp: number): boolean { return cp >= 0x17E0 && cp <= 0x17E9; }
+
+// lunar1: (១?)([០-៩])្។ -> lunar symbol (base U+19E0)
+function lunar1(r: number[]): number[] {
+  const n = r.length;
+  const out: number[] = [];
+  for (let i = 0; i < n;) {
+    if (r[i] === 0x17E1 && i + 3 < n && isDigit(r[i + 1]) && r[i + 2] === COENG && r[i + 3] === 0x17D4) {
+      const v = 10 + (r[i + 1] - 0x17E0);
+      if (v > 15) {
+        for (let p = i; p < i + 4; p++) out.push(r[p]);
+      } else {
+        out.push(0x19E0 + v);
+      }
+      i += 4;
+      continue;
+    }
+    if (i + 2 < n && isDigit(r[i]) && r[i + 1] === COENG && r[i + 2] === 0x17D4) {
+      out.push(0x19E0 + (r[i] - 0x17E0));
+      i += 3;
+      continue;
+    }
+    out.push(r[i]);
+    i++;
+  }
+  return out;
+}
+
+// lunar2: ។្(១?)([០-៩]) -> lunar symbol (base U+19F0)
+function lunar2(r: number[]): number[] {
+  const n = r.length;
+  const out: number[] = [];
+  for (let i = 0; i < n;) {
+    if (r[i] === 0x17D4 && i + 1 < n && r[i + 1] === COENG) {
+      if (i + 3 < n && r[i + 2] === 0x17E1 && isDigit(r[i + 3])) {
+        const v = 10 + (r[i + 3] - 0x17E0);
+        if (v > 15) {
+          for (let p = i; p < i + 4; p++) out.push(r[p]);
+        } else {
+          out.push(0x19F0 + v);
+        }
+        i += 4;
+        continue;
+      }
+      if (i + 2 < n && isDigit(r[i + 2])) {
+        out.push(0x19F0 + (r[i + 2] - 0x17E0));
+        i += 3;
+        continue;
+      }
+    }
+    out.push(r[i]);
+    i++;
+  }
+  return out;
+}
+
+// hasKhmer reports whether any codepoint lies in the Khmer block U+1780–U+17FF.
+// No Khmer codepoint => identity, matching the Go SWAR fast path.
+function hasKhmer(cps: number[]): boolean {
+  for (let i = 0; i < cps.length; i++) {
+    const c = cps[i];
+    if (c >= 0x1780 && c <= 0x17FF) return true;
+  }
+  return false;
 }
 
 /** Returns the Khmer-normalized form of txt. */
 export function normalize(txt: string, lang = 'km'): string {
   if (lang === 'xhm') {
-    txt = txt.replace(/[ា-ៅ]្/gu, m => '‍' + m);
+    // [ា-ៅ]្  ->  ‍ + match  (U+17B6..U+17C5 followed by U+17D2)
+    const src = [...txt].map(c => c.codePointAt(0)!);
+    const tmp: number[] = [];
+    for (let p = 0; p < src.length; p++) {
+      if (src[p] >= 0x17B6 && src[p] <= 0x17C5 && p + 1 < src.length && src[p + 1] === 0x17D2) {
+        tmp.push(ZWJ, src[p], 0x17D2);
+        p++;
+        continue;
+      }
+      tmp.push(src[p]);
+    }
+    txt = String.fromCodePoint(...tmp);
   }
 
   const cps = [...txt].map(c => c.codePointAt(0)!);
   const n = cps.length;
+  if (!hasKhmer(cps)) return txt;
+
   const cats: Cat[] = cps.map(charcat);
 
   for (let i = 1; i < n; i++) {
@@ -95,26 +403,22 @@ export function normalize(txt: string, lang = 'km'): string {
     const indices = Array.from({ length: j - i }, (_, k) => i + k);
     indices.sort((a, b) => cats[a] !== cats[b] ? cats[a] - cats[b] : a - b);
 
-    let syl = indices.map(k => String.fromCodePoint(cps[k])).join('');
+    let syl = indices.map(k => cps[k]);
 
-    syl = syl.replace(reInvis,   '$1');
-    syl = syl.replace(reVBE,     'ោី');
-    syl = syl.replace(reV1,      'ើ$1');
-    syl = syl.replace(reV2,      'ោ$1');
-    syl = syl.replace(reV3,      '$2$1');
-    syl = syl.replace(reStrong,  '$1៊');
-    syl = syl.replace(reNStrong, '$1៉');
-    syl = syl.replace(reCoengRo, '$2$1');
-    syl = syl.replace(reCoengDa, '្ត');
-    syl = syl.replace(reLunar1, (_, d1, d2) => lunarReplace(d1, d2, 0x19E0) ?? _);
-    syl = syl.replace(reLunar2, (_, d1, d2) => lunarReplace(d1, d2, 0x19F0) ?? _);
-    syl = syl.replaceAll('។្។', '᧰');
+    syl = collapseInvis(syl);
+    syl = pairReplace(syl, 0x17BE, 0x17B6, 0x17C4, 0x17B8); // ើា -> ោី
+    syl = vowelSplit(syl, 0x17B8, 0x17BE);                  // េ(◌)ី -> ើ(◌)
+    syl = vowelSplit(syl, 0x17B6, 0x17C4);                  // េ(◌)ា -> ោ(◌)
+    syl = pairReplace(syl, 0x17BE, 0x17BB, 0x17BB, 0x17BE); // ើុ -> ុើ
+    applyShifter(syl, strongEnds, 0x17CA);                  // strong  -u -> ៊
+    applyShifter(syl, nstrongEnds, 0x17C9);                 // weak    -u -> ៉
+    syl = coengRo(syl);
+    syl = coengDa(syl);
+    syl = lunar1(syl);
+    syl = lunar2(syl);
+    syl = pairReplace3(syl, 0x17D4, 0x17D2, 0x17D4, 0x19F0); // ។្។ -> ᧰
 
-    // reset lastIndex for stateful global regexes
-    [reInvis, reVBE, reV1, reV2, reV3, reStrong, reNStrong,
-     reCoengRo, reCoengDa, reLunar1, reLunar2].forEach(r => r.lastIndex = 0);
-
-    parts.push(syl);
+    parts.push(String.fromCodePoint(...syl));
     i = j;
   }
   return parts.join('');

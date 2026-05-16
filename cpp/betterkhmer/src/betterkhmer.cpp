@@ -1,17 +1,14 @@
 // Copyright (c) 2021-2024, SIL Global. Licensed under MIT license.
-// Ported to C++ (PCRE2) — betterkhmer package.
+// Ported to C++ — betterkhmer package. Regex-free; 1:1 with the Go reference.
 
-#define PCRE2_CODE_UNIT_WIDTH 8
 #include "betterkhmer.hpp"
-#include <pcre2.h>
 #include <array>
 #include <vector>
 #include <string>
-#include <cstring>
 #include <algorithm>
 #include <numeric>
-#include <stdexcept>
 #include <cstdint>
+#include <cstddef>
 
 namespace betterkhmer {
 namespace {
@@ -49,6 +46,42 @@ Cat charcat(uint32_t cp) {
     return CatOther;
 }
 
+/* ---- Khmer consonant classes (from the SIL reference khres) ---- */
+
+constexpr uint32_t ZWNJ = 0x200C, ZWJ = 0x200D, COENG = 0x17D2,
+                   ROBAT = 0x17CC, BA = 0x1794;
+
+bool isBase(uint32_t r) {
+    return (r >= 0x1780 && r <= 0x17A2) || (r >= 0x17A5 && r <= 0x17B3) || r == 0x25CC;
+}
+bool isNonRo(uint32_t r) {
+    return (r >= 0x1780 && r <= 0x1799) || (r >= 0x179B && r <= 0x17A2) ||
+           (r >= 0x17A5 && r <= 0x17B3);
+}
+bool isNonBA(uint32_t r) {
+    return (r >= 0x1780 && r <= 0x1793) || (r >= 0x1795 && r <= 0x17A2) ||
+           (r >= 0x17A5 && r <= 0x17B3);
+}
+bool isS1(uint32_t r) {
+    if (r >= 0x1780 && r <= 0x1783) return true;
+    if (r >= 0x1785 && r <= 0x1788) return true;
+    if (r >= 0x178A && r <= 0x178D) return true;
+    if (r >= 0x178F && r <= 0x1792) return true;
+    if (r >= 0x1795 && r <= 0x1797) return true;
+    if (r >= 0x179E && r <= 0x17A0) return true;
+    if (r == 0x17A2) return true;
+    return false;
+}
+bool isS2(uint32_t r) {
+    if (r == 0x1780 || r == 0x1784 || r == 0x178E || r == 0x1793 ||
+        r == 0x1794 || r == 0x17A1) return true;
+    if (r >= 0x1798 && r <= 0x179D) return true;
+    if (r >= 0x17A3 && r <= 0x17B3) return true;
+    return false;
+}
+bool isVPre(uint32_t r) { return r >= 0x17C1 && r <= 0x17C5; }
+bool isDigit(uint32_t r) { return r >= 0x17E0 && r <= 0x17E9; }
+
 /* ---- UTF-8 encode/decode ---- */
 
 int u8dec(const uint8_t* s, uint32_t& out) {
@@ -66,188 +99,384 @@ int u8enc(uint32_t cp, uint8_t* out) {
     out[0]=0xF0|(cp>>18); out[1]=0x80|((cp>>12)&0x3F); out[2]=0x80|((cp>>6)&0x3F); out[3]=0x80|(cp&0x3F); return 4;
 }
 
-std::string encodeCP(uint32_t cp) {
+void appendCP(std::string& out, uint32_t cp) {
     uint8_t buf[4]; int n = u8enc(cp, buf);
-    return {reinterpret_cast<char*>(buf), static_cast<size_t>(n)};
+    out.append(reinterpret_cast<char*>(buf), static_cast<size_t>(n));
 }
 
-/* ---- PCRE2 wrapper ---- */
+using Vec = std::vector<uint32_t>;
 
-struct Re {
-    pcre2_code* code = nullptr;
-    Re() = default;
-    Re(const char* pat) {
-        int err; PCRE2_SIZE erroff;
-        code = pcre2_compile((PCRE2_SPTR)pat, PCRE2_ZERO_TERMINATED,
-                             PCRE2_UTF | PCRE2_UCP, &err, &erroff, nullptr);
-        if (!code) throw std::runtime_error("bad regex");
-    }
-    ~Re() { if (code) pcre2_code_free(code); }
-    Re(const Re&) = delete;
-    Re& operator=(const Re&) = delete;
-};
+/* ---- optRobat: positions after an optional Robat at p ---- */
 
-/* Global substitute with a fixed replacement template ($0/$1/$2 supported). */
-std::string subStr(const Re& re, const std::string& s, const char* repl) {
-    size_t inlen = s.size();
-    size_t bufcap = inlen * 2 + 256;
-    std::string buf(bufcap, '\0');
-    PCRE2_SIZE outlen = bufcap;
-    int rc = pcre2_substitute(re.code, (PCRE2_SPTR)s.data(), inlen, 0,
-        PCRE2_SUBSTITUTE_GLOBAL | PCRE2_SUBSTITUTE_EXTENDED |
-        PCRE2_SUBSTITUTE_OVERFLOW_LENGTH,
-        nullptr, nullptr,
-        (PCRE2_SPTR)repl, PCRE2_ZERO_TERMINATED,
-        (PCRE2_UCHAR*)buf.data(), &outlen);
-    if (rc == PCRE2_ERROR_NOMEMORY) {
-        bufcap = outlen + 1;
-        buf.resize(bufcap);
-        outlen = bufcap;
-        rc = pcre2_substitute(re.code, (PCRE2_SPTR)s.data(), inlen, 0,
-            PCRE2_SUBSTITUTE_GLOBAL | PCRE2_SUBSTITUTE_EXTENDED,
-            nullptr, nullptr,
-            (PCRE2_SPTR)repl, PCRE2_ZERO_TERMINATED,
-            (PCRE2_UCHAR*)buf.data(), &outlen);
-    }
-    if (rc < 0) return s;
-    buf.resize(outlen);
-    return buf;
+std::vector<int> optRobat(const Vec& r, int p) {
+    if (p < (int)r.size() && r[p] == ROBAT) return { p, p + 1 };
+    return { p };
 }
 
-/* Global substitute with callback. */
-using SubFn = std::string(*)(const std::string& input, size_t ms, size_t me,
-                              int ng, const PCRE2_SIZE* ov, void* ctx);
+/* ---- coengEnds: end indices of one COENG: (?:(?:្ NonRo)? ្ B) ---- */
 
-std::string subFn(const Re& re, const std::string& input, SubFn fn, void* ctx) {
-    size_t inlen = input.size();
-    pcre2_match_data* md = pcre2_match_data_create_from_pattern(re.code, nullptr);
-    std::string out;
-    out.reserve(inlen);
-    size_t pos = 0;
-    while (pos <= inlen) {
-        int rc = pcre2_match(re.code, (PCRE2_SPTR)input.data(), inlen, pos, 0, md, nullptr);
-        if (rc < 0) { out.append(input, pos); break; }
-        const PCRE2_SIZE* ov = pcre2_get_ovector_pointer(md);
-        size_t ms = ov[0], me = ov[1];
-        out.append(input, pos, ms - pos);
-        out += fn(input, ms, me, rc, ov, ctx);
-        if (me == ms) { if (ms < inlen) out += input[ms]; pos = ms + 1; }
-        else pos = me;
+std::vector<int> coengEnds(const Vec& r, int s) {
+    int n = (int)r.size();
+    std::vector<int> res;
+    if (s + 1 < n && r[s] == COENG && isBase(r[s + 1])) res.push_back(s + 2);
+    if (s + 3 < n && r[s] == COENG && isNonRo(r[s + 1]) &&
+        r[s + 2] == COENG && isBase(r[s + 3])) res.push_back(s + 4);
+    return res;
+}
+
+/* ---- strongEnds / nstrongEnds ---- */
+
+template <typename Add>
+void strongEnds(const Vec& r, int s, Add add) {
+    int n = (int)r.size();
+    if (s >= n) return;
+    if (isS1(r[s])) {
+        for (int p : optRobat(r, s + 1)) {
+            add(p);
+            if (p + 1 < n && r[p] == COENG && isNonBA(r[p + 1])) {
+                int q = p + 2;
+                add(q);
+                if (q + 1 < n && r[q] == COENG && isNonBA(r[q + 1])) add(q + 2);
+            }
+        }
     }
-    pcre2_match_data_free(md);
+    if (isNonBA(r[s])) {
+        for (int p : optRobat(r, s + 1)) {
+            if (p + 1 < n && r[p] == COENG && isS1(r[p + 1])) {
+                int q = p + 2;
+                add(q);
+                if (q + 1 < n && r[q] == COENG && isNonBA(r[q + 1])) add(q + 2);
+            }
+            if (p + 3 < n && r[p] == COENG && isNonBA(r[p + 1]) &&
+                r[p + 2] == COENG && isS1(r[p + 3])) add(p + 4);
+        }
+    }
+}
+
+template <typename Add>
+void nstrongEnds(const Vec& r, int s, Add add) {
+    int n = (int)r.size();
+    if (s >= n) return;
+    if (isS2(r[s])) {
+        for (int p : optRobat(r, s + 1)) {
+            add(p);
+            if (p + 1 < n && r[p] == COENG && isS2(r[p + 1])) {
+                int q = p + 2;
+                add(q);
+                if (q + 1 < n && r[q] == COENG && isS2(r[q + 1])) add(q + 2);
+            }
+        }
+    }
+    if (r[s] == BA) {
+        for (int p : optRobat(r, s + 1)) {
+            add(p);
+            for (int e1 : coengEnds(r, p)) {
+                add(e1);
+                for (int e2 : coengEnds(r, e1)) add(e2);
+            }
+        }
+    }
+    if (isBase(r[s])) {
+        for (int p : optRobat(r, s + 1)) {
+            if (p + 3 < n && r[p] == COENG && isNonRo(r[p + 1]) &&
+                r[p + 2] == COENG && r[p + 3] == BA) add(p + 4);
+            if (p + 3 < n && r[p] == COENG && r[p + 1] == BA &&
+                r[p + 2] == COENG && isBase(r[p + 3])) add(p + 4);
+        }
+    }
+}
+
+/* ---- canEndAt ---- */
+
+template <typename Ends>
+bool canEndAt(const Vec& r, int target, Ends ends) {
+    for (int s = 0; s < target; s++) {
+        bool found = false;
+        ends(r, s, [&](int e){ if (e == target) found = true; });
+        if (found) return true;
+    }
+    return false;
+}
+
+/* ---- vaSamyokAt: lookahead (?:VA | ័) ---- */
+
+bool vaSamyokAt(const Vec& r, int p) {
+    int n = (int)r.size();
+    if (p >= n) return false;
+    uint32_t c = r[p];
+    if (c == 0x17D0) return true;
+    if (c >= 0x17B7 && c <= 0x17BA) return true;
+    if (c == 0x17BE || c == 0x17BF || c == 0x17DD) return true;
+    if (c == 0x17B6 && p + 1 < n && r[p + 1] == 0x17C6) return true;
+    return false;
+}
+
+/* ---- applyShifter (mutates r in place) ---- */
+
+template <typename Ends>
+void applyShifter(Vec& r, Ends ends, uint32_t shifter) {
+    for (int k = 0; k < (int)r.size(); k++) {
+        if (r[k] != 0x17BB) continue;
+        bool ctx = canEndAt(r, k, ends) ||
+                   (k >= 1 && isVPre(r[k - 1]) && canEndAt(r, k - 1, ends));
+        if (ctx && vaSamyokAt(r, k + 1)) r[k] = shifter;
+    }
+}
+
+/* ---- collapseInvis: (‍?្)[្‌‍]+ -> \1 ---- */
+
+bool isInvis(uint32_t c) { return c == COENG || c == ZWNJ || c == ZWJ; }
+
+Vec collapseInvis(const Vec& r) {
+    int n = (int)r.size();
+    Vec out;
+    out.reserve(n);
+    int i = 0;
+    while (i < n) {
+        int g1End = -1;
+        if (r[i] == ZWJ && i + 1 < n && r[i + 1] == COENG) g1End = i + 2;
+        else if (r[i] == COENG) g1End = i + 1;
+        if (g1End >= 0) {
+            int k = g1End;
+            while (k < n && isInvis(r[k])) k++;
+            if (k > g1End) {
+                out.insert(out.end(), r.begin() + i, r.begin() + g1End);
+                i = k;
+                continue;
+            }
+        }
+        out.push_back(r[i]);
+        i++;
+    }
     return out;
 }
 
-std::string strReplaceAll(const std::string& src, const std::string& needle, const std::string& repl) {
-    std::string out;
-    size_t pos = 0, found;
-    while ((found = src.find(needle, pos)) != std::string::npos) {
-        out.append(src, pos, found - pos);
-        out += repl;
-        pos = found + needle.size();
+/* ---- pairReplace / pairReplace3 ---- */
+
+Vec pairReplace(const Vec& r, uint32_t a, uint32_t b, std::initializer_list<uint32_t> repl) {
+    int n = (int)r.size();
+    Vec out;
+    out.reserve(n);
+    for (int i = 0; i < n;) {
+        if (i + 1 < n && r[i] == a && r[i + 1] == b) {
+            out.insert(out.end(), repl.begin(), repl.end());
+            i += 2;
+            continue;
+        }
+        out.push_back(r[i]);
+        i++;
     }
-    out.append(src, pos);
     return out;
 }
 
-/* ---- Khmer patterns (raw UTF-8 bytes) ---- */
-
-#define B      "[\xe1\x9e\x80-\xe1\x9e\xa2\xe1\x9e\xa5-\xe1\x9e\xb3\xe2\x97\x8c]"
-#define NON_RO "[\xe1\x9e\x80-\xe1\x9e\x99\xe1\x9e\x9b-\xe1\x9e\xa2\xe1\x9e\xa5-\xe1\x9e\xb3]"
-#define NON_BA "[\xe1\x9e\x80-\xe1\x9e\x93\xe1\x9e\x95-\xe1\x9e\xa2\xe1\x9e\xa5-\xe1\x9e\xb3]"
-#define S1     "[\xe1\x9e\x80-\xe1\x9e\x83\xe1\x9e\x85-\xe1\x9e\x88\xe1\x9e\x8a-\xe1\x9e\x8d\xe1\x9e\x8f-\xe1\x9e\x92\xe1\x9e\x95-\xe1\x9e\x97\xe1\x9e\x9e-\xe1\x9e\xa0\xe1\x9e\xa2]"
-#define S2     "[\xe1\x9e\x84\xe1\x9e\x80\xe1\x9e\x8e\xe1\x9e\x93\xe1\x9e\x94\xe1\x9e\x98-\xe1\x9e\x9d\xe1\x9e\xa1\xe1\x9e\xa3-\xe1\x9e\xb3]"
-#define VA     "(?:[\xe1\x9e\xb7-\xe1\x9e\xba\xe1\x9e\xbe\xe1\x9e\xbf\xe1\x9f\x9d]|\xe1\x9e\xb6\xe1\x9f\x86)"
-#define COENG  "(?:(?:\xe1\x9f\x92" NON_RO ")?\xe1\x9f\x92" B ")"
-#define STRONG \
-    S1 "\xe1\x9f\x8c?(?:\xe1\x9f\x92" NON_BA "(?:\xe1\x9f\x92" NON_BA ")?)?" \
-    "|" NON_BA "\xe1\x9f\x8c?(?:\xe1\x9f\x92" S1 "(?:\xe1\x9f\x92" NON_BA ")?" \
-    "|\xe1\x9f\x92" NON_BA "\xe1\x9f\x92" S1 ")"
-#define NSTRONG \
-    "(?:" S2 "\xe1\x9f\x8c?(?:\xe1\x9f\x92" S2 "(?:\xe1\x9f\x92" S2 ")?)?" \
-    "|\xe1\x9e\x94\xe1\x9f\x8c?(?:" COENG "(?:" COENG ")?)?" \
-    "|" B "\xe1\x9f\x8c?(?:\xe1\x9f\x92" NON_RO "\xe1\x9f\x92\xe1\x9e\x94" \
-    "|\xe1\x9f\x92\xe1\x9e\x94(?:\xe1\x9f\x92" B ")))"
-
-/* Compiled regexes — initialised on first call via static local */
-struct Regexes {
-    Re invis, vbe, v1, v2, v3, strong, nstrong, coengRo, coengDa, lunar1, lunar2, xhm;
-    Regexes() :
-        invis   ("(\xe2\x80\x8d?\xe1\x9f\x92)[\xe1\x9f\x92\xe2\x80\x8c\xe2\x80\x8d]+"),
-        vbe     ("\xe1\x9e\xbe\xe1\x9e\xb6"),
-        v1      ("\xe1\x9f\x81([\xe1\x9e\xbb-\xe1\x9e\xbd]?)\xe1\x9e\xb8"),
-        v2      ("\xe1\x9f\x81([\xe1\x9e\xbb-\xe1\x9e\xbd]?)\xe1\x9e\xb6"),
-        v3      ("(\xe1\x9e\xbe)(\xe1\x9e\xbb)"),
-        strong  ("((?:" STRONG  ")[\xe1\x9f\x81-\xe1\x9f\x85]?)\xe1\x9e\xbb"
-                 "(?=" VA "|\xe1\x9f\x90)"),
-        nstrong ("((?:" NSTRONG ")[\xe1\x9f\x81-\xe1\x9f\x85]?)\xe1\x9e\xbb"
-                 "(?=" VA "|\xe1\x9f\x90)"),
-        coengRo ("(\xe1\x9f\x92\xe1\x9e\x9a)(\xe1\x9f\x92[\xe1\x9e\x80-\xe1\x9e\xb3])"),
-        coengDa ("\xe1\x9f\x92\xe1\x9e\x8a"),
-        lunar1  ("(\xe1\x9f\xa1?)([\xe1\x9f\xa0-\xe1\x9f\xa9])\xe1\x9f\x92\xe1\x9f\x94"),
-        lunar2  ("\xe1\x9f\x94\xe1\x9f\x92(\xe1\x9f\xa1?)([\xe1\x9f\xa0-\xe1\x9f\xa9])"),
-        xhm     ("[\xe1\x9e\xb6-\xe1\x9f\x85]\xe1\x9f\x92")
-    {}
-};
-
-const Regexes& re() {
-    static const Regexes R;
-    return R;
+Vec pairReplace3(const Vec& r, uint32_t a, uint32_t b, uint32_t c, uint32_t repl) {
+    int n = (int)r.size();
+    Vec out;
+    out.reserve(n);
+    for (int i = 0; i < n;) {
+        if (i + 2 < n && r[i] == a && r[i + 1] == b && r[i + 2] == c) {
+            out.push_back(repl);
+            i += 3;
+            continue;
+        }
+        out.push_back(r[i]);
+        i++;
+    }
+    return out;
 }
 
-std::string lunarCb(const std::string& input, size_t ms, size_t me,
-                    int ng, const PCRE2_SIZE* ov, void* ctx) {
-    uint32_t base = *static_cast<uint32_t*>(ctx);
-    int v1 = 0;
-    if (ng >= 2 && ov[2] != PCRE2_UNSET && ov[3] > ov[2]) {
-        uint32_t cp; u8dec(reinterpret_cast<const uint8_t*>(input.data()) + ov[2], cp);
-        v1 = static_cast<int>(cp) - 0x17E0;
+/* ---- vowelSplit: េ([ុ-ួ]?)tail -> head + \1 ---- */
+
+Vec vowelSplit(const Vec& r, uint32_t tail, uint32_t head) {
+    int n = (int)r.size();
+    Vec out;
+    out.reserve(n);
+    for (int i = 0; i < n;) {
+        if (r[i] == 0x17C1) {
+            if (i + 2 < n && r[i + 1] >= 0x17BB && r[i + 1] <= 0x17BD && r[i + 2] == tail) {
+                out.push_back(head);
+                out.push_back(r[i + 1]);
+                i += 3;
+                continue;
+            }
+            if (i + 1 < n && r[i + 1] == tail) {
+                out.push_back(head);
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(r[i]);
+        i++;
     }
-    uint32_t d2; u8dec(reinterpret_cast<const uint8_t*>(input.data()) + ov[4], d2);
-    int v = v1 * 10 + static_cast<int>(d2) - 0x17E0;
-    if (v > 15) return input.substr(ms, me - ms);
-    return encodeCP(base + static_cast<uint32_t>(v));
+    return out;
+}
+
+/* ---- coengRo: (្រ)(្[ក-ឳ]) -> \2\1 ---- */
+
+Vec coengRo(const Vec& r) {
+    int n = (int)r.size();
+    Vec out;
+    out.reserve(n);
+    for (int i = 0; i < n;) {
+        if (i + 3 < n && r[i] == COENG && r[i + 1] == 0x179A &&
+            r[i + 2] == COENG && r[i + 3] >= 0x1780 && r[i + 3] <= 0x17B3) {
+            out.push_back(r[i + 2]);
+            out.push_back(r[i + 3]);
+            out.push_back(r[i]);
+            out.push_back(r[i + 1]);
+            i += 4;
+            continue;
+        }
+        out.push_back(r[i]);
+        i++;
+    }
+    return out;
+}
+
+/* ---- coengDa: (្)ដ -> \1ត ---- */
+
+Vec coengDa(const Vec& r) {
+    int n = (int)r.size();
+    Vec out;
+    out.reserve(n);
+    for (int i = 0; i < n;) {
+        if (i + 1 < n && r[i] == COENG && r[i + 1] == 0x178A) {
+            out.push_back(COENG);
+            out.push_back(0x178F);
+            i += 2;
+            continue;
+        }
+        out.push_back(r[i]);
+        i++;
+    }
+    return out;
+}
+
+/* ---- lunar1: (១?)([០-៩])្។ -> lunar symbol (base U+19E0) ---- */
+
+Vec lunar1(const Vec& r) {
+    int n = (int)r.size();
+    Vec out;
+    out.reserve(n);
+    for (int i = 0; i < n;) {
+        if (r[i] == 0x17E1 && i + 3 < n && isDigit(r[i + 1]) &&
+            r[i + 2] == COENG && r[i + 3] == 0x17D4) {
+            int v = 10 + (int)(r[i + 1] - 0x17E0);
+            if (v > 15) out.insert(out.end(), r.begin() + i, r.begin() + i + 4);
+            else out.push_back((uint32_t)(0x19E0 + v));
+            i += 4;
+            continue;
+        }
+        if (i + 2 < n && isDigit(r[i]) && r[i + 1] == COENG && r[i + 2] == 0x17D4) {
+            out.push_back((uint32_t)(0x19E0 + (int)(r[i] - 0x17E0)));
+            i += 3;
+            continue;
+        }
+        out.push_back(r[i]);
+        i++;
+    }
+    return out;
+}
+
+/* ---- lunar2: ។្(១?)([០-៩]) -> lunar symbol (base U+19F0) ---- */
+
+Vec lunar2(const Vec& r) {
+    int n = (int)r.size();
+    Vec out;
+    out.reserve(n);
+    for (int i = 0; i < n;) {
+        if (r[i] == 0x17D4 && i + 1 < n && r[i + 1] == COENG) {
+            if (i + 3 < n && r[i + 2] == 0x17E1 && isDigit(r[i + 3])) {
+                int v = 10 + (int)(r[i + 3] - 0x17E0);
+                if (v > 15) out.insert(out.end(), r.begin() + i, r.begin() + i + 4);
+                else out.push_back((uint32_t)(0x19F0 + v));
+                i += 4;
+                continue;
+            }
+            if (i + 2 < n && isDigit(r[i + 2])) {
+                out.push_back((uint32_t)(0x19F0 + (int)(r[i + 2] - 0x17E0)));
+                i += 3;
+                continue;
+            }
+        }
+        out.push_back(r[i]);
+        i++;
+    }
+    return out;
+}
+
+/* ---- hasByteE1: SWAR scan for byte 0xE1 ---- */
+
+bool hasByteE1(const std::string& s) {
+    const uint64_t lo = 0x0101010101010101ULL;
+    const uint64_t hi = 0x8080808080808080ULL;
+    const uint64_t mask = 0xE1E1E1E1E1E1E1E1ULL;
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(s.data());
+    size_t len = s.size();
+    size_t i = 0;
+    for (; i + 8 <= len; i += 8) {
+        uint64_t w = (uint64_t)p[i] | (uint64_t)p[i + 1] << 8 |
+                     (uint64_t)p[i + 2] << 16 | (uint64_t)p[i + 3] << 24 |
+                     (uint64_t)p[i + 4] << 32 | (uint64_t)p[i + 5] << 40 |
+                     (uint64_t)p[i + 6] << 48 | (uint64_t)p[i + 7] << 56;
+        uint64_t x = w ^ mask;
+        if ((x - lo) & ~x & hi) return true;
+    }
+    for (; i < len; i++) if (p[i] == 0xE1) return true;
+    return false;
 }
 
 } // anonymous namespace
 
 std::string normalize(const std::string& txt, const std::string& lang) {
-    const Regexes& R = re();
+    /* SWAR skip/scan fast path: no Khmer byte => identity. */
+    if (!hasByteE1(txt)) return txt;
 
-    std::string s = txt;
-    if (lang == "xhm")
-        s = subStr(R.xhm, s, "\xe2\x80\x8d$0");
-
-    /* Decode UTF-8 to codepoints */
-    std::vector<uint32_t> cps;
-    std::vector<Cat> cats;
-    cps.reserve(s.size());
-    cats.reserve(s.size());
-    const auto* p = reinterpret_cast<const uint8_t*>(s.data());
-    const auto* end = p + s.size();
-    while (p < end) {
-        uint32_t cp; int nb = u8dec(p, cp); p += nb;
-        cps.push_back(cp);
-        cats.push_back(charcat(cp));
+    /* Decode UTF-8 to code points. */
+    Vec raw;
+    raw.reserve(txt.size());
+    {
+        const auto* p = reinterpret_cast<const uint8_t*>(txt.data());
+        const auto* end = p + txt.size();
+        while (p < end) {
+            uint32_t cp; int nb = u8dec(p, cp); p += nb;
+            raw.push_back(cp);
+        }
     }
-    int n = static_cast<int>(cps.size());
 
-    /* Recategorise */
+    /* XHM pre-step: insert U+200D before each [U+17B6-U+17C5] U+17D2 sequence. */
+    Vec cps;
+    if (lang == "xhm") {
+        cps.reserve(raw.size() * 2);
+        for (size_t k = 0; k < raw.size(); k++) {
+            if (raw[k] >= 0x17B6 && raw[k] <= 0x17C5 &&
+                k + 1 < raw.size() && raw[k + 1] == 0x17D2)
+                cps.push_back(0x200D);
+            cps.push_back(raw[k]);
+        }
+    } else {
+        cps = std::move(raw);
+    }
+
+    int n = (int)cps.size();
+    std::vector<Cat> cats(n);
+    for (int k = 0; k < n; k++) cats[k] = charcat(cps[k]);
+
+    /* Recategorise. */
     for (int i = 1; i < n; i++) {
-        if (cps[i-1] == 0x200D || cps[i-1] == 0x17D2) {
+        if (cps[i-1] == ZWJ || cps[i-1] == COENG) {
             if (cats[i] == CatBase || cats[i] == CatCoeng)
                 cats[i] = cats[i-1];
         }
     }
 
-    /* Process syllables */
     std::string res;
-    res.reserve(s.size());
+    res.reserve(txt.size());
     std::vector<int> indices;
 
     int i = 0;
     while (i < n) {
-        if (cats[i] != CatBase) { res += encodeCP(cps[i]); i++; continue; }
+        if (cats[i] != CatBase) { appendCP(res, cps[i]); i++; continue; }
         int j = i + 1;
         while (j < n && cats[j] > CatBase) j++;
 
@@ -258,28 +487,23 @@ std::string normalize(const std::string& txt, const std::string& lang) {
             return cats[a] != cats[b] ? cats[a] < cats[b] : a < b;
         });
 
-        std::string syl;
-        syl.reserve(slen * 4);
-        for (int k : indices) syl += encodeCP(cps[k]);
+        Vec syl(slen);
+        for (int k = 0; k < slen; k++) syl[k] = cps[indices[k]];
 
-        syl = subStr(R.invis,   syl, "$1");
-        syl = subStr(R.vbe,     syl, "\xe1\x9f\x84\xe1\x9e\xb8");
-        syl = subStr(R.v1,      syl, "\xe1\x9e\xbe$1");
-        syl = subStr(R.v2,      syl, "\xe1\x9f\x84$1");
-        syl = subStr(R.v3,      syl, "$2$1");
-        syl = subStr(R.strong,  syl, "$1\xe1\x9f\x8a");
-        syl = subStr(R.nstrong, syl, "$1\xe1\x9f\x89");
-        syl = subStr(R.coengRo, syl, "$2$1");
-        syl = subStr(R.coengDa, syl, "\xe1\x9f\x92\xe1\x9e\x8f");
+        syl = collapseInvis(syl);
+        syl = pairReplace(syl, 0x17BE, 0x17B6, { 0x17C4, 0x17B8 });
+        syl = vowelSplit(syl, 0x17B8, 0x17BE);
+        syl = vowelSplit(syl, 0x17B6, 0x17C4);
+        syl = pairReplace(syl, 0x17BE, 0x17BB, { 0x17BB, 0x17BE });
+        applyShifter(syl, [](const Vec& r, int s, auto add){ strongEnds(r, s, add); }, 0x17CA);
+        applyShifter(syl, [](const Vec& r, int s, auto add){ nstrongEnds(r, s, add); }, 0x17C9);
+        syl = coengRo(syl);
+        syl = coengDa(syl);
+        syl = lunar1(syl);
+        syl = lunar2(syl);
+        syl = pairReplace3(syl, 0x17D4, 0x17D2, 0x17D4, 0x19F0);
 
-        uint32_t base1 = 0x19E0, base2 = 0x19F0;
-        syl = subFn(R.lunar1, syl, lunarCb, &base1);
-        syl = subFn(R.lunar2, syl, lunarCb, &base2);
-        syl = strReplaceAll(syl,
-            "\xe1\x9f\x94\xe1\x9f\x92\xe1\x9f\x94",
-            "\xe1\xa7\xb0");
-
-        res += syl;
+        for (uint32_t cp : syl) appendCP(res, cp);
         i = j;
     }
     return res;

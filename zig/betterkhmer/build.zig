@@ -9,8 +9,6 @@ pub fn build(b: *std.Build) void {
         .target           = target,
         .optimize         = optimize,
     });
-    mod.linkSystemLibrary("pcre2-8", .{});
-    mod.link_libc = true;
 
     const test_exe = b.addExecutable(.{
         .name            = "test_normalize",

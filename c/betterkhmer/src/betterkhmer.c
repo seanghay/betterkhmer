@@ -1,11 +1,8 @@
 // Copyright (c) 2021-2024, SIL Global. Licensed under MIT license.
-// Ported to C (PCRE2) — betterkhmer.
+// Ported to C — betterkhmer. Regex-free; 1:1 with the Go reference.
 
-#define PCRE2_CODE_UNIT_WIDTH 8
 #include "betterkhmer.h"
-#include <pcre2.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -45,6 +42,51 @@ static int charcat(uint32_t cp) {
     return CAT_OTHER;
 }
 
+/* ---- Khmer consonant classes (from the SIL reference khres) ---- */
+
+#define ZWNJ  0x200Cu
+#define ZWJ   0x200Du
+#define COENG 0x17D2u
+#define ROBAT 0x17CCu
+#define BA    0x1794u
+
+static int is_base(uint32_t r) {
+    return (r >= 0x1780 && r <= 0x17A2) || (r >= 0x17A5 && r <= 0x17B3) || r == 0x25CC;
+}
+
+static int is_non_ro(uint32_t r) {
+    return (r >= 0x1780 && r <= 0x1799) || (r >= 0x179B && r <= 0x17A2) ||
+           (r >= 0x17A5 && r <= 0x17B3);
+}
+
+static int is_non_ba(uint32_t r) {
+    return (r >= 0x1780 && r <= 0x1793) || (r >= 0x1795 && r <= 0x17A2) ||
+           (r >= 0x17A5 && r <= 0x17B3);
+}
+
+static int is_s1(uint32_t r) {
+    if (r >= 0x1780 && r <= 0x1783) return 1;
+    if (r >= 0x1785 && r <= 0x1788) return 1;
+    if (r >= 0x178A && r <= 0x178D) return 1;
+    if (r >= 0x178F && r <= 0x1792) return 1;
+    if (r >= 0x1795 && r <= 0x1797) return 1;
+    if (r >= 0x179E && r <= 0x17A0) return 1;
+    if (r == 0x17A2) return 1;
+    return 0;
+}
+
+static int is_s2(uint32_t r) {
+    if (r == 0x1780 || r == 0x1784 || r == 0x178E || r == 0x1793 ||
+        r == 0x1794 || r == 0x17A1) return 1;
+    if (r >= 0x1798 && r <= 0x179D) return 1;
+    if (r >= 0x17A3 && r <= 0x17B3) return 1;
+    return 0;
+}
+
+static int is_vpre(uint32_t r) { return r >= 0x17C1 && r <= 0x17C5; }
+
+static int is_digit(uint32_t r) { return r >= 0x17E0 && r <= 0x17E9; }
+
 /* ---- UTF-8 utilities ---- */
 
 static int u8dec(const unsigned char *s, uint32_t *out) {
@@ -70,7 +112,7 @@ static int u8enc(uint32_t cp, unsigned char *out) {
     return 4;
 }
 
-/* ---- Dynamic buffer ---- */
+/* ---- Dynamic byte buffer ---- */
 
 typedef struct { char *d; size_t n, cap; } Buf;
 
@@ -90,174 +132,350 @@ static void buf_push_cp(Buf *b, uint32_t cp) {
     buf_push(b, (char *)tmp, n);
 }
 
-/* ---- PCRE2 helpers ---- */
+/* ---- Code-point sequence helper ---- */
 
-static pcre2_code *mkre(const char *pat) {
-    int err;
-    PCRE2_SIZE erroff;
-    pcre2_code *re = pcre2_compile(
-        (PCRE2_SPTR)pat, PCRE2_ZERO_TERMINATED,
-        PCRE2_UTF | PCRE2_UCP, &err, &erroff, NULL);
-    if (!re) {
-        PCRE2_UCHAR msg[256];
-        pcre2_get_error_message(err, msg, sizeof msg);
-        fprintf(stderr, "betterkhmer: bad pattern at offset %zu: %s\n", erroff, (char *)msg);
-        abort();
-    }
-    return re;
+typedef struct { uint32_t *r; int n, cap; } Seq;
+
+static Seq seq_new(int cap) {
+    Seq s; s.r = malloc((size_t)(cap > 0 ? cap : 1) * sizeof(uint32_t));
+    s.n = 0; s.cap = cap > 0 ? cap : 1;
+    return s;
 }
 
-/* Global substitute with a fixed replacement template (supports $0, $1, $2). */
-static char *sub_str(pcre2_code *re, const char *s, const char *repl) {
-    size_t inlen = strlen(s);
-    size_t bufcap = inlen * 2 + 256;
-    char *buf = malloc(bufcap);
-    PCRE2_SIZE outlen = bufcap;
-    int rc = pcre2_substitute(re, (PCRE2_SPTR)s, inlen, 0,
-        PCRE2_SUBSTITUTE_GLOBAL | PCRE2_SUBSTITUTE_EXTENDED |
-        PCRE2_SUBSTITUTE_OVERFLOW_LENGTH,
-        NULL, NULL,
-        (PCRE2_SPTR)repl, PCRE2_ZERO_TERMINATED,
-        (PCRE2_UCHAR *)buf, &outlen);
-    if (rc == PCRE2_ERROR_NOMEMORY) {
-        free(buf);
-        bufcap = outlen + 1;
-        buf = malloc(bufcap);
-        outlen = bufcap;
-        rc = pcre2_substitute(re, (PCRE2_SPTR)s, inlen, 0,
-            PCRE2_SUBSTITUTE_GLOBAL | PCRE2_SUBSTITUTE_EXTENDED,
-            NULL, NULL,
-            (PCRE2_SPTR)repl, PCRE2_ZERO_TERMINATED,
-            (PCRE2_UCHAR *)buf, &outlen);
-    }
-    if (rc < 0) { free(buf); return strdup(s); }
-    return buf;
+static void seq_push(Seq *s, uint32_t cp) {
+    if (s->n >= s->cap) { s->cap = s->cap * 2 + 8; s->r = realloc(s->r, (size_t)s->cap * sizeof(uint32_t)); }
+    s->r[s->n++] = cp;
 }
 
-/* Global substitute with a callback: fn returns a malloc'd replacement. */
-typedef char *(*SubFn)(const char *input, size_t ms, size_t me,
-                       int ng, const PCRE2_SIZE *ov, void *ctx);
-
-static char *sub_fn(pcre2_code *re, const char *input, SubFn fn, void *ctx) {
-    size_t inlen = strlen(input);
-    pcre2_match_data *md = pcre2_match_data_create_from_pattern(re, NULL);
-    Buf out = {0};
-    size_t pos = 0;
-    while (pos <= inlen) {
-        int rc = pcre2_match(re, (PCRE2_SPTR)input, inlen, pos, 0, md, NULL);
-        if (rc < 0) { buf_push(&out, input + pos, inlen - pos); break; }
-        const PCRE2_SIZE *ov = pcre2_get_ovector_pointer(md);
-        size_t ms = ov[0], me = ov[1];
-        buf_push(&out, input + pos, ms - pos);
-        char *repl = fn(input, ms, me, rc, ov, ctx);
-        buf_push(&out, repl, strlen(repl));
-        free(repl);
-        if (me == ms) { if (ms < inlen) buf_push(&out, input + ms, 1); pos = ms + 1; }
-        else pos = me;
-    }
-    pcre2_match_data_free(md);
-    return out.d ? out.d : strdup("");
+static void seq_push_n(Seq *s, const uint32_t *src, int n) {
+    for (int k = 0; k < n; k++) seq_push(s, src[k]);
 }
 
-/* Simple literal string replace (all occurrences). */
-static char *str_replace_all(const char *src, const char *needle, const char *repl) {
-    size_t nlen = strlen(needle), rlen = strlen(repl);
-    Buf out = {0};
-    const char *p = src;
-    const char *found;
-    while ((found = strstr(p, needle)) != NULL) {
-        buf_push(&out, p, (size_t)(found - p));
-        buf_push(&out, repl, rlen);
-        p = found + nlen;
-    }
-    buf_push(&out, p, strlen(p));
-    return out.d ? out.d : strdup(src);
+/* ---- optRobat: positions after an optional Robat at p ---- */
+
+/* Writes up to two end positions into pp; returns the count (1 or 2). */
+static int opt_robat(const uint32_t *r, int n, int p, int pp[2]) {
+    if (p < n && r[p] == ROBAT) { pp[0] = p; pp[1] = p + 1; return 2; }
+    pp[0] = p; return 1;
 }
 
-/* ---- Khmer regex patterns (all chars as raw UTF-8 bytes) ---- */
+/* ---- coengEnds: end indices of one COENG: (?:(?:្ NonRo)? ្ B) ---- */
 
-/* Component definitions using raw UTF-8 byte sequences for Khmer code points:
-   \xe1\x9e\x80 = U+1780, \xe1\x9e\xa2 = U+17A2, \xe1\x9e\xa5 = U+17A5,
-   \xe1\x9e\xb3 = U+17B3, \xe2\x97\x8c = U+25CC (dotted circle).            */
-#define B      "[\xe1\x9e\x80-\xe1\x9e\xa2\xe1\x9e\xa5-\xe1\x9e\xb3\xe2\x97\x8c]"
-#define NON_RO "[\xe1\x9e\x80-\xe1\x9e\x99\xe1\x9e\x9b-\xe1\x9e\xa2\xe1\x9e\xa5-\xe1\x9e\xb3]"
-#define NON_BA "[\xe1\x9e\x80-\xe1\x9e\x93\xe1\x9e\x95-\xe1\x9e\xa2\xe1\x9e\xa5-\xe1\x9e\xb3]"
-#define S1     "[\xe1\x9e\x80-\xe1\x9e\x83\xe1\x9e\x85-\xe1\x9e\x88\xe1\x9e\x8a-\xe1\x9e\x8d\xe1\x9e\x8f-\xe1\x9e\x92\xe1\x9e\x95-\xe1\x9e\x97\xe1\x9e\x9e-\xe1\x9e\xa0\xe1\x9e\xa2]"
-#define S2     "[\xe1\x9e\x84\xe1\x9e\x80\xe1\x9e\x8e\xe1\x9e\x93\xe1\x9e\x94\xe1\x9e\x98-\xe1\x9e\x9d\xe1\x9e\xa1\xe1\x9e\xa3-\xe1\x9e\xb3]"
-/* VA: [U+17B7-U+17BA, U+17BE, U+17BF, U+17DD] | U+17B6 U+17C6 */
-#define VA     "(?:[\xe1\x9e\xb7-\xe1\x9e\xba\xe1\x9e\xbe\xe1\x9e\xbf\xe1\x9f\x9d]|\xe1\x9e\xb6\xe1\x9f\x86)"
-/* U+17D2 = COENG \xe1\x9f\x92 */
-#define COENG  "(?:(?:\xe1\x9f\x92" NON_RO ")?\xe1\x9f\x92" B ")"
-/* U+17CC = ROBAT \xe1\x9f\x8c, U+1794 = BA \xe1\x9e\x94 */
-#define STRONG \
-    S1 "\xe1\x9f\x8c?(?:\xe1\x9f\x92" NON_BA "(?:\xe1\x9f\x92" NON_BA ")?)?" \
-    "|" NON_BA "\xe1\x9f\x8c?(?:\xe1\x9f\x92" S1 "(?:\xe1\x9f\x92" NON_BA ")?" \
-    "|\xe1\x9f\x92" NON_BA "\xe1\x9f\x92" S1 ")"
-#define NSTRONG \
-    "(?:" S2 "\xe1\x9f\x8c?(?:\xe1\x9f\x92" S2 "(?:\xe1\x9f\x92" S2 ")?)?" \
-    "|\xe1\x9e\x94\xe1\x9f\x8c?(?:" COENG "(?:" COENG ")?)?" \
-    "|" B "\xe1\x9f\x8c?(?:\xe1\x9f\x92" NON_RO "\xe1\x9f\x92\xe1\x9e\x94" \
-    "|\xe1\x9f\x92\xe1\x9e\x94(?:\xe1\x9f\x92" B ")))"
-
-/* Compiled patterns (initialised once) */
-static pcre2_code *re_invis, *re_vbe, *re_v1, *re_v2, *re_v3;
-static pcre2_code *re_strong, *re_nstrong;
-static pcre2_code *re_coeng_ro, *re_coeng_da;
-static pcre2_code *re_lunar1, *re_lunar2;
-static pcre2_code *re_xhm;
-
-static void init_re(void) {
-    /* RE_INVIS: (U+200D? U+17D2) [U+17D2 U+200C U+200D]+ */
-    re_invis = mkre("(\xe2\x80\x8d?\xe1\x9f\x92)[\xe1\x9f\x92\xe2\x80\x8c\xe2\x80\x8d]+");
-    /* RE_VBE: U+17BE U+17B6 */
-    re_vbe = mkre("\xe1\x9e\xbe\xe1\x9e\xb6");
-    /* RE_V1: U+17C1 ([U+17BB-U+17BD]?) U+17B8 */
-    re_v1 = mkre("\xe1\x9f\x81([\xe1\x9e\xbb-\xe1\x9e\xbd]?)\xe1\x9e\xb8");
-    /* RE_V2: U+17C1 ([U+17BB-U+17BD]?) U+17B6 */
-    re_v2 = mkre("\xe1\x9f\x81([\xe1\x9e\xbb-\xe1\x9e\xbd]?)\xe1\x9e\xb6");
-    /* RE_V3: (U+17BE)(U+17BB) */
-    re_v3 = mkre("(\xe1\x9e\xbe)(\xe1\x9e\xbb)");
-    /* RE_STRONG / RE_NSTRONG: capture group 1 = STRONG+VPre?, then U+17BB,
-       lookahead VA | U+17D0 */
-    re_strong  = mkre("((?:" STRONG  ")[\xe1\x9f\x81-\xe1\x9f\x85]?)\xe1\x9e\xbb"
-                      "(?=" VA "|\xe1\x9f\x90)");
-    re_nstrong = mkre("((?:" NSTRONG ")[\xe1\x9f\x81-\xe1\x9f\x85]?)\xe1\x9e\xbb"
-                      "(?=" VA "|\xe1\x9f\x90)");
-    /* RE_COENG_RO: (U+17D2 U+179A)(U+17D2 [U+1780-U+17B3]) */
-    re_coeng_ro = mkre("(\xe1\x9f\x92\xe1\x9e\x9a)(\xe1\x9f\x92[\xe1\x9e\x80-\xe1\x9e\xb3])");
-    /* RE_COENG_DA: U+17D2 U+178A */
-    re_coeng_da = mkre("\xe1\x9f\x92\xe1\x9e\x8a");
-    /* RE_LUNAR1: (U+17E1?) ([U+17E0-U+17E9]) U+17D2 U+17D4 */
-    re_lunar1 = mkre("(\xe1\x9f\xa1?)([\xe1\x9f\xa0-\xe1\x9f\xa9])\xe1\x9f\x92\xe1\x9f\x94");
-    /* RE_LUNAR2: U+17D4 U+17D2 (U+17E1?) ([U+17E0-U+17E9]) */
-    re_lunar2 = mkre("\xe1\x9f\x94\xe1\x9f\x92(\xe1\x9f\xa1?)([\xe1\x9f\xa0-\xe1\x9f\xa9])");
-    /* XHM: [U+17B6-U+17C5] U+17D2 */
-    re_xhm = mkre("[\xe1\x9e\xb6-\xe1\x9f\x85]\xe1\x9f\x92");
+static int coeng_ends(const uint32_t *r, int n, int s, int ee[2]) {
+    int c = 0;
+    if (s + 1 < n && r[s] == COENG && is_base(r[s + 1])) ee[c++] = s + 2;
+    if (s + 3 < n && r[s] == COENG && is_non_ro(r[s + 1]) &&
+        r[s + 2] == COENG && is_base(r[s + 3])) ee[c++] = s + 4;
+    return c;
 }
 
-/* ---- Lunar date callback ---- */
+/* ---- strongEnds / nstrongEnds ---- */
 
-static char *lunar_cb(const char *input, size_t ms, size_t me,
-                      int ng, const PCRE2_SIZE *ov, void *ctx) {
-    uint32_t base = *(const uint32_t *)ctx;
-    int v1 = 0;
-    if (ng >= 2 && ov[2] != PCRE2_UNSET && ov[3] > ov[2]) {
-        uint32_t cp; u8dec((const unsigned char *)input + ov[2], &cp);
-        v1 = (int)cp - 0x17E0;
+typedef void (*AddFn)(int e, void *ctx);
+
+static void strong_ends(const uint32_t *r, int n, int s, AddFn add, void *ctx) {
+    if (s >= n) return;
+    if (is_s1(r[s])) {
+        int pp[2]; int np = opt_robat(r, n, s + 1, pp);
+        for (int t = 0; t < np; t++) {
+            int p = pp[t];
+            add(p, ctx);
+            if (p + 1 < n && r[p] == COENG && is_non_ba(r[p + 1])) {
+                int q = p + 2;
+                add(q, ctx);
+                if (q + 1 < n && r[q] == COENG && is_non_ba(r[q + 1]))
+                    add(q + 2, ctx);
+            }
+        }
     }
-    uint32_t d2; u8dec((const unsigned char *)input + ov[4], &d2);
-    int v = v1 * 10 + (int)d2 - 0x17E0;
-    if (v > 15) {
-        size_t mlen = me - ms;
-        char *r = malloc(mlen + 1);
-        memcpy(r, input + ms, mlen); r[mlen] = '\0';
-        return r;
+    if (is_non_ba(r[s])) {
+        int pp[2]; int np = opt_robat(r, n, s + 1, pp);
+        for (int t = 0; t < np; t++) {
+            int p = pp[t];
+            if (p + 1 < n && r[p] == COENG && is_s1(r[p + 1])) {
+                int q = p + 2;
+                add(q, ctx);
+                if (q + 1 < n && r[q] == COENG && is_non_ba(r[q + 1]))
+                    add(q + 2, ctx);
+            }
+            if (p + 3 < n && r[p] == COENG && is_non_ba(r[p + 1]) &&
+                r[p + 2] == COENG && is_s1(r[p + 3]))
+                add(p + 4, ctx);
+        }
     }
-    unsigned char tmp[4];
-    int n = u8enc(base + (uint32_t)v, tmp);
-    char *r = malloc(n + 1);
-    memcpy(r, tmp, n); r[n] = '\0';
-    return r;
+}
+
+static void nstrong_ends(const uint32_t *r, int n, int s, AddFn add, void *ctx) {
+    if (s >= n) return;
+    if (is_s2(r[s])) {
+        int pp[2]; int np = opt_robat(r, n, s + 1, pp);
+        for (int t = 0; t < np; t++) {
+            int p = pp[t];
+            add(p, ctx);
+            if (p + 1 < n && r[p] == COENG && is_s2(r[p + 1])) {
+                int q = p + 2;
+                add(q, ctx);
+                if (q + 1 < n && r[q] == COENG && is_s2(r[q + 1]))
+                    add(q + 2, ctx);
+            }
+        }
+    }
+    if (r[s] == BA) {
+        int pp[2]; int np = opt_robat(r, n, s + 1, pp);
+        for (int t = 0; t < np; t++) {
+            int p = pp[t];
+            add(p, ctx);
+            int e1[2]; int n1 = coeng_ends(r, n, p, e1);
+            for (int a = 0; a < n1; a++) {
+                add(e1[a], ctx);
+                int e2[2]; int n2 = coeng_ends(r, n, e1[a], e2);
+                for (int b = 0; b < n2; b++) add(e2[b], ctx);
+            }
+        }
+    }
+    if (is_base(r[s])) {
+        int pp[2]; int np = opt_robat(r, n, s + 1, pp);
+        for (int t = 0; t < np; t++) {
+            int p = pp[t];
+            if (p + 3 < n && r[p] == COENG && is_non_ro(r[p + 1]) &&
+                r[p + 2] == COENG && r[p + 3] == BA)
+                add(p + 4, ctx);
+            if (p + 3 < n && r[p] == COENG && r[p + 1] == BA &&
+                r[p + 2] == COENG && is_base(r[p + 3]))
+                add(p + 4, ctx);
+        }
+    }
+}
+
+typedef void (*EndsFn)(const uint32_t *, int, int, AddFn, void *);
+
+/* ---- canEndAt ---- */
+
+typedef struct { int target; int found; } CanCtx;
+
+static void can_add(int e, void *ctx) {
+    CanCtx *c = ctx;
+    if (e == c->target) c->found = 1;
+}
+
+static int can_end_at(const uint32_t *r, int n, int target, EndsFn ends) {
+    for (int s = 0; s < target; s++) {
+        CanCtx c = { target, 0 };
+        ends(r, n, s, can_add, &c);
+        if (c.found) return 1;
+    }
+    return 0;
+}
+
+/* ---- vaSamyokAt: lookahead (?:VA | ័) ---- */
+
+static int va_samyok_at(const uint32_t *r, int n, int p) {
+    if (p >= n) return 0;
+    uint32_t c = r[p];
+    if (c == 0x17D0) return 1;
+    if (c >= 0x17B7 && c <= 0x17BA) return 1;
+    if (c == 0x17BE || c == 0x17BF || c == 0x17DD) return 1;
+    if (c == 0x17B6 && p + 1 < n && r[p + 1] == 0x17C6) return 1;
+    return 0;
+}
+
+/* ---- applyShifter (mutates r in place) ---- */
+
+static void apply_shifter(uint32_t *r, int n, EndsFn ends, uint32_t shifter) {
+    for (int k = 0; k < n; k++) {
+        if (r[k] != 0x17BB) continue;
+        int ctx = can_end_at(r, n, k, ends) ||
+                  (k >= 1 && is_vpre(r[k - 1]) && can_end_at(r, n, k - 1, ends));
+        if (ctx && va_samyok_at(r, n, k + 1)) r[k] = shifter;
+    }
+}
+
+/* ---- collapseInvis: (‍?្)[្‌‍]+ -> \1 ---- */
+
+static int is_invis(uint32_t c) { return c == COENG || c == ZWNJ || c == ZWJ; }
+
+static Seq collapse_invis(const uint32_t *r, int n) {
+    Seq out = seq_new(n);
+    int i = 0;
+    while (i < n) {
+        int g1_end = -1;
+        if (r[i] == ZWJ && i + 1 < n && r[i + 1] == COENG) g1_end = i + 2;
+        else if (r[i] == COENG) g1_end = i + 1;
+        if (g1_end >= 0) {
+            int k = g1_end;
+            while (k < n && is_invis(r[k])) k++;
+            if (k > g1_end) {
+                seq_push_n(&out, r + i, g1_end - i);
+                i = k;
+                continue;
+            }
+        }
+        seq_push(&out, r[i]);
+        i++;
+    }
+    return out;
+}
+
+/* ---- pairReplace / pairReplace3 ---- */
+
+static Seq pair_replace(const uint32_t *r, int n, uint32_t a, uint32_t b,
+                        const uint32_t *repl, int rn) {
+    Seq out = seq_new(n);
+    for (int i = 0; i < n;) {
+        if (i + 1 < n && r[i] == a && r[i + 1] == b) {
+            seq_push_n(&out, repl, rn);
+            i += 2;
+            continue;
+        }
+        seq_push(&out, r[i]);
+        i++;
+    }
+    return out;
+}
+
+static Seq pair_replace3(const uint32_t *r, int n, uint32_t a, uint32_t b,
+                         uint32_t c, uint32_t repl) {
+    Seq out = seq_new(n);
+    for (int i = 0; i < n;) {
+        if (i + 2 < n && r[i] == a && r[i + 1] == b && r[i + 2] == c) {
+            seq_push(&out, repl);
+            i += 3;
+            continue;
+        }
+        seq_push(&out, r[i]);
+        i++;
+    }
+    return out;
+}
+
+/* ---- vowelSplit: េ([ុ-ួ]?)tail -> head + \1 ---- */
+
+static Seq vowel_split(const uint32_t *r, int n, uint32_t tail, uint32_t head) {
+    Seq out = seq_new(n);
+    for (int i = 0; i < n;) {
+        if (r[i] == 0x17C1) {
+            if (i + 2 < n && r[i + 1] >= 0x17BB && r[i + 1] <= 0x17BD && r[i + 2] == tail) {
+                seq_push(&out, head);
+                seq_push(&out, r[i + 1]);
+                i += 3;
+                continue;
+            }
+            if (i + 1 < n && r[i + 1] == tail) {
+                seq_push(&out, head);
+                i += 2;
+                continue;
+            }
+        }
+        seq_push(&out, r[i]);
+        i++;
+    }
+    return out;
+}
+
+/* ---- coengRo: (្រ)(្[ក-ឳ]) -> \2\1 ---- */
+
+static Seq coeng_ro(const uint32_t *r, int n) {
+    Seq out = seq_new(n);
+    for (int i = 0; i < n;) {
+        if (i + 3 < n && r[i] == COENG && r[i + 1] == 0x179A &&
+            r[i + 2] == COENG && r[i + 3] >= 0x1780 && r[i + 3] <= 0x17B3) {
+            seq_push(&out, r[i + 2]);
+            seq_push(&out, r[i + 3]);
+            seq_push(&out, r[i]);
+            seq_push(&out, r[i + 1]);
+            i += 4;
+            continue;
+        }
+        seq_push(&out, r[i]);
+        i++;
+    }
+    return out;
+}
+
+/* ---- coengDa: (្)ដ -> \1ត ---- */
+
+static Seq coeng_da(const uint32_t *r, int n) {
+    Seq out = seq_new(n);
+    for (int i = 0; i < n;) {
+        if (i + 1 < n && r[i] == COENG && r[i + 1] == 0x178A) {
+            seq_push(&out, COENG);
+            seq_push(&out, 0x178F);
+            i += 2;
+            continue;
+        }
+        seq_push(&out, r[i]);
+        i++;
+    }
+    return out;
+}
+
+/* ---- lunar1: (១?)([០-៩])្។ -> lunar symbol (base U+19E0) ---- */
+
+static Seq lunar1(const uint32_t *r, int n) {
+    Seq out = seq_new(n);
+    for (int i = 0; i < n;) {
+        if (r[i] == 0x17E1 && i + 3 < n && is_digit(r[i + 1]) &&
+            r[i + 2] == COENG && r[i + 3] == 0x17D4) {
+            int v = 10 + (int)(r[i + 1] - 0x17E0);
+            if (v > 15) seq_push_n(&out, r + i, 4);
+            else seq_push(&out, (uint32_t)(0x19E0 + v));
+            i += 4;
+            continue;
+        }
+        if (i + 2 < n && is_digit(r[i]) && r[i + 1] == COENG && r[i + 2] == 0x17D4) {
+            seq_push(&out, (uint32_t)(0x19E0 + (int)(r[i] - 0x17E0)));
+            i += 3;
+            continue;
+        }
+        seq_push(&out, r[i]);
+        i++;
+    }
+    return out;
+}
+
+/* ---- lunar2: ។្(១?)([០-៩]) -> lunar symbol (base U+19F0) ---- */
+
+static Seq lunar2(const uint32_t *r, int n) {
+    Seq out = seq_new(n);
+    for (int i = 0; i < n;) {
+        if (r[i] == 0x17D4 && i + 1 < n && r[i + 1] == COENG) {
+            if (i + 3 < n && r[i + 2] == 0x17E1 && is_digit(r[i + 3])) {
+                int v = 10 + (int)(r[i + 3] - 0x17E0);
+                if (v > 15) seq_push_n(&out, r + i, 4);
+                else seq_push(&out, (uint32_t)(0x19F0 + v));
+                i += 4;
+                continue;
+            }
+            if (i + 2 < n && is_digit(r[i + 2])) {
+                seq_push(&out, (uint32_t)(0x19F0 + (int)(r[i + 2] - 0x17E0)));
+                i += 3;
+                continue;
+            }
+        }
+        seq_push(&out, r[i]);
+        i++;
+    }
+    return out;
+}
+
+/* ---- hasByteE1: SWAR scan for byte 0xE1 ---- */
+
+static int has_byte_e1(const char *s, size_t len) {
+    const uint64_t lo = 0x0101010101010101ULL;
+    const uint64_t hi = 0x8080808080808080ULL;
+    const uint64_t mask = 0xE1E1E1E1E1E1E1E1ULL;
+    const unsigned char *p = (const unsigned char *)s;
+    size_t i = 0;
+    for (; i + 8 <= len; i += 8) {
+        uint64_t w = (uint64_t)p[i] | (uint64_t)p[i + 1] << 8 |
+                     (uint64_t)p[i + 2] << 16 | (uint64_t)p[i + 3] << 24 |
+                     (uint64_t)p[i + 4] << 32 | (uint64_t)p[i + 5] << 40 |
+                     (uint64_t)p[i + 6] << 48 | (uint64_t)p[i + 7] << 56;
+        uint64_t x = w ^ mask;
+        if ((x - lo) & ~x & hi) return 1;
+    }
+    for (; i < len; i++) if (p[i] == 0xE1) return 1;
+    return 0;
 }
 
 /* ---- Sort helper ---- */
@@ -273,93 +491,102 @@ static int cmp_indices(const void *a, const void *b) {
 
 char *normalize(const char *txt, const char *lang) {
     static int initialised = 0;
-    if (!initialised) { init_cats(); init_re(); initialised = 1; }
+    if (!initialised) { init_cats(); initialised = 1; }
 
-    /* XHM pre-step: insert U+200D before each [U+17B6-U+17C5] U+17D2 sequence */
-    char *s;
-    if (lang && strcmp(lang, "xhm") == 0)
-        s = sub_str(re_xhm, txt, "\xe2\x80\x8d$0");
-    else
-        s = strdup(txt);
+    size_t txtlen = strlen(txt);
 
-    /* Decode UTF-8 to codepoints */
-    size_t slen = strlen(s);
-    /* Upper bound: each byte could be a separate ASCII char */
-    uint32_t *cps = malloc((slen + 1) * sizeof(uint32_t));
-    int      *cats = malloc((slen + 1) * sizeof(int));
-    int       n = 0;
-    const unsigned char *p = (const unsigned char *)s;
-    const unsigned char *end = p + slen;
-    while (p < end) {
-        uint32_t cp; int nb = u8dec(p, &cp); p += nb;
-        cps[n] = cp; cats[n] = charcat(cp); n++;
+    /* SWAR skip/scan fast path: no Khmer byte => identity. */
+    if (!has_byte_e1(txt, txtlen)) {
+        char *copy = malloc(txtlen + 1);
+        memcpy(copy, txt, txtlen + 1);
+        return copy;
     }
-    free(s);
 
-    /* Recategorise: char after U+17D2 or U+200D that is Base/Coeng → propagate */
+    /* Decode UTF-8 to code points. */
+    uint32_t *raw = malloc((txtlen + 1) * sizeof(uint32_t));
+    int rawn = 0;
+    {
+        const unsigned char *p = (const unsigned char *)txt;
+        const unsigned char *end = p + txtlen;
+        while (p < end) {
+            uint32_t cp; int nb = u8dec(p, &cp); p += nb;
+            raw[rawn++] = cp;
+        }
+    }
+
+    /* XHM pre-step: insert U+200D before each [U+17B6-U+17C5] U+17D2 sequence. */
+    uint32_t *cps;
+    int n;
+    if (lang && strcmp(lang, "xhm") == 0) {
+        cps = malloc((size_t)(rawn * 2 + 1) * sizeof(uint32_t));
+        n = 0;
+        for (int k = 0; k < rawn; k++) {
+            if (raw[k] >= 0x17B6 && raw[k] <= 0x17C5 &&
+                k + 1 < rawn && raw[k + 1] == 0x17D2) {
+                cps[n++] = 0x200D;
+            }
+            cps[n++] = raw[k];
+        }
+        free(raw);
+    } else {
+        cps = raw;
+        n = rawn;
+    }
+
+    int *cats = malloc((size_t)(n > 0 ? n : 1) * sizeof(int));
+    for (int k = 0; k < n; k++) cats[k] = charcat(cps[k]);
+
+    /* Recategorise. */
     for (int i = 1; i < n; i++) {
-        if (cps[i - 1] == 0x200D || cps[i - 1] == 0x17D2) {
+        if (cps[i - 1] == ZWJ || cps[i - 1] == COENG) {
             if (cats[i] == CAT_BASE || cats[i] == CAT_COENG)
                 cats[i] = cats[i - 1];
         }
     }
 
-    /* Find syllables, sort, and apply substitutions */
     Buf res = {0};
-    int *indices = malloc((slen + 1) * sizeof(int));
+    int *indices = malloc((size_t)(n > 0 ? n : 1) * sizeof(int));
 
     int i = 0;
     while (i < n) {
-        if (cats[i] != CAT_BASE) {
-            buf_push_cp(&res, cps[i]); i++; continue;
-        }
+        if (cats[i] != CAT_BASE) { buf_push_cp(&res, cps[i]); i++; continue; }
         int j = i + 1;
         while (j < n && cats[j] > CAT_BASE) j++;
 
-        int syl_len = j - i;
-        for (int k = 0; k < syl_len; k++) indices[k] = i + k;
+        int slen = j - i;
+        for (int k = 0; k < slen; k++) indices[k] = i + k;
         g_sort_cats = cats;
-        qsort(indices, (size_t)syl_len, sizeof(int), cmp_indices);
+        qsort(indices, (size_t)slen, sizeof(int), cmp_indices);
 
-        /* Build syllable UTF-8 string */
-        Buf sylbuf = {0};
-        for (int k = 0; k < syl_len; k++) buf_push_cp(&sylbuf, cps[indices[k]]);
-        char *syl = sylbuf.d ? sylbuf.d : strdup("");
+        Seq syl = seq_new(slen);
+        for (int k = 0; k < slen; k++) seq_push(&syl, cps[indices[k]]);
 
-        /* Apply substitutions */
-        char *t;
+        Seq t;
+        t = collapse_invis(syl.r, syl.n); free(syl.r); syl = t;
 
-        t = sub_str(re_invis,    syl, "$1");                  free(syl); syl = t;
-        /* U+17C4 U+17B8 */
-        t = sub_str(re_vbe,      syl, "\xe1\x9f\x84\xe1\x9e\xb8"); free(syl); syl = t;
-        /* U+17BE + $1 */
-        t = sub_str(re_v1,       syl, "\xe1\x9e\xbe$1");      free(syl); syl = t;
-        /* U+17C4 + $1 */
-        t = sub_str(re_v2,       syl, "\xe1\x9f\x84$1");      free(syl); syl = t;
-        t = sub_str(re_v3,       syl, "$2$1");                 free(syl); syl = t;
-        /* $1 + U+17CA (TRIISAP) */
-        t = sub_str(re_strong,   syl, "$1\xe1\x9f\x8a");      free(syl); syl = t;
-        /* $1 + U+17C9 (MUUSIKATOAN) */
-        t = sub_str(re_nstrong,  syl, "$1\xe1\x9f\x89");      free(syl); syl = t;
-        t = sub_str(re_coeng_ro, syl, "$2$1");                 free(syl); syl = t;
-        /* U+17D2 U+178F */
-        t = sub_str(re_coeng_da, syl, "\xe1\x9f\x92\xe1\x9e\x8f"); free(syl); syl = t;
+        uint32_t r1[2] = { 0x17C4, 0x17B8 };
+        t = pair_replace(syl.r, syl.n, 0x17BE, 0x17B6, r1, 2); free(syl.r); syl = t;
+        t = vowel_split(syl.r, syl.n, 0x17B8, 0x17BE); free(syl.r); syl = t;
+        t = vowel_split(syl.r, syl.n, 0x17B6, 0x17C4); free(syl.r); syl = t;
+        uint32_t r2[2] = { 0x17BB, 0x17BE };
+        t = pair_replace(syl.r, syl.n, 0x17BE, 0x17BB, r2, 2); free(syl.r); syl = t;
 
-        uint32_t base1 = 0x19E0, base2 = 0x19F0;
-        t = sub_fn(re_lunar1, syl, lunar_cb, &base1);          free(syl); syl = t;
-        t = sub_fn(re_lunar2, syl, lunar_cb, &base2);          free(syl); syl = t;
+        apply_shifter(syl.r, syl.n, strong_ends, 0x17CA);
+        apply_shifter(syl.r, syl.n, nstrong_ends, 0x17C9);
 
-        /* U+17D4 U+17D2 U+17D4 → U+19F0 (᧰) */
-        t = str_replace_all(syl,
-                "\xe1\x9f\x94\xe1\x9f\x92\xe1\x9f\x94",
-                "\xe1\xa7\xb0");
-        free(syl); syl = t;
+        t = coeng_ro(syl.r, syl.n); free(syl.r); syl = t;
+        t = coeng_da(syl.r, syl.n); free(syl.r); syl = t;
+        t = lunar1(syl.r, syl.n); free(syl.r); syl = t;
+        t = lunar2(syl.r, syl.n); free(syl.r); syl = t;
+        t = pair_replace3(syl.r, syl.n, 0x17D4, 0x17D2, 0x17D4, 0x19F0);
+        free(syl.r); syl = t;
 
-        buf_push(&res, syl, strlen(syl));
-        free(syl);
+        for (int k = 0; k < syl.n; k++) buf_push_cp(&res, syl.r[k]);
+        free(syl.r);
         i = j;
     }
 
     free(cps); free(cats); free(indices);
-    return res.d ? res.d : strdup("");
+    if (!res.d) { res.d = malloc(1); res.d[0] = '\0'; }
+    return res.d;
 }
